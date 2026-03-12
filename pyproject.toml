@@ -1,0 +1,23 @@
+[project]
+name = "shorts-visual-transcriber"
+version = "0.1.0"
+description = "OCR-based text transcription for short-form videos."
+requires-python = ">=3.11"
+dependencies = [
+  "easyocr>=1.7.1",
+  "numpy>=1.26.0",
+  "opencv-python>=4.10.0.84",
+  "streamlit>=1.43.0",
+  "yt-dlp>=2025.2.19",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+shorts-visual-transcriber = "app.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

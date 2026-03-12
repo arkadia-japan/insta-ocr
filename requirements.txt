@@ -1,0 +1,5 @@
+easyocr>=1.7.1
+numpy>=1.26.0
+opencv-python>=4.10.0.84
+streamlit>=1.43.0
+yt-dlp>=2025.2.19

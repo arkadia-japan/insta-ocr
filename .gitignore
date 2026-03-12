@@ -1,0 +1,12 @@
+﻿__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+env/
+streamlit_app.log
+.streamlit/
+debug_frames/
+downloads/
+output/
+output_*/
+bench_*/
