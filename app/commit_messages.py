@@ -28,7 +28,7 @@ CATEGORY_RULES = (
     CategoryRule("テスト", ("tests/",)),
     CategoryRule("Git運用", (".githooks/", "app/commit_messages.py")),
     CategoryRule("設定", ("pyproject.toml", "requirements.txt", ".gitignore")),
-    CategoryRule("ドキュメント", ("README.md",)),
+    CategoryRule("ドキュメント", ("README.md", "COMMIT_WORKFLOW.md", "docs/")),
 )
 
 

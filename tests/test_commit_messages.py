@@ -31,6 +31,12 @@ def test_build_auto_summary_limits_number_of_categories():
     assert summary == "OCR・セグメント判定・パイプライン・他更新"
 
 
+def test_build_auto_summary_treats_commit_workflow_as_documentation():
+    summary = build_auto_summary(["COMMIT_WORKFLOW.md"])
+
+    assert summary == "ドキュメント更新"
+
+
 def test_format_commit_subject_adds_date_and_auto_summary():
     subject = format_commit_subject(
         existing_subject="しきい値を調整",
