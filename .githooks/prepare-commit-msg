@@ -1,0 +1,2 @@
+#!/bin/sh
+python -m app.commit_messages hook "$@"
