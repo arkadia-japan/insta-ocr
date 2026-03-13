@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .utils import format_compact_time
+
 
 @dataclass
 class Snapshot:
@@ -28,6 +30,22 @@ class TranscriptionResult:
     ocr_hits: int
     fallback_used: bool
     segments: list[TranscriptSegment]
+
+    def to_full_text(self, include_timestamps: bool = False) -> str:
+        blocks: list[str] = []
+        previous_text = ""
+        for segment in self.segments:
+            text = segment.text.strip()
+            if not text or text == previous_text:
+                continue
+            if include_timestamps:
+                blocks.append(
+                    f"[{format_compact_time(segment.start_sec)} - {format_compact_time(segment.end_sec)}]\n{text}"
+                )
+            else:
+                blocks.append(text)
+            previous_text = text
+        return "\n\n".join(blocks)
 
     def to_dict(self) -> dict:
         return {

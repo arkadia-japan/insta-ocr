@@ -41,7 +41,7 @@ def resolve_video_path(
 
     local_path = Path(input_ref).expanduser().resolve()
     if not local_path.exists():
-        raise FileNotFoundError(f"Input file was not found: {local_path}")
+        raise FileNotFoundError(f"入力ファイルが見つかりません: {local_path}")
     return local_path, False
 
 
@@ -63,6 +63,7 @@ def run_single_input(
         _report_status(status_callback, f"動画URLを取得しています: {platform}")
     else:
         _report_status(status_callback, "ローカル動画を読み込んでいます")
+
     video_path, was_downloaded = resolve_video_path(
         input_ref=input_ref,
         download_dir=download_dir,
