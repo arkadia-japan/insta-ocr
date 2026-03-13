@@ -37,10 +37,22 @@ def _visual_signature(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def _frame_quality_score(frame: np.ndarray) -> float:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    edges = cv2.Canny(gray, 70, 160)
+    height, width = gray.shape[:2]
+    y0 = int(height * 0.05)
+    y1 = max(y0 + 1, int(height * 0.95))
+    x0 = int(width * 0.05)
+    x1 = max(x0 + 1, int(width * 0.95))
+    focus = gray[y0:y1, x0:x1]
+    if focus.size == 0:
+        focus = gray
+
+    laplacian_var = float(cv2.Laplacian(focus, cv2.CV_64F).var())
+    contrast = float(np.std(focus))
+    edges = cv2.Canny(focus, 70, 160)
     edge_density = float(np.mean(edges) / 255.0)
-    return laplacian_var + (edge_density * 150.0)
+    mean_luma = float(np.mean(focus) / 255.0)
+    exposure_balance = max(0.0, 1.0 - abs(mean_luma - 0.62))
+    return (laplacian_var * 0.75) + (contrast * 3.0) + (edge_density * 180.0) + (exposure_balance * 24.0)
 
 
 def sample_video_segments(
@@ -211,8 +223,8 @@ def _update_candidate_frames(
     frame,
     time_sec: float,
     quality_score: float,
-    max_candidates: int = 2,
-    min_time_gap_sec: float = 0.6,
+    max_candidates: int = 3,
+    min_time_gap_sec: float = 0.45,
 ) -> None:
     for candidate in current_segment["candidate_frames"]:
         if abs(candidate["time_sec"] - time_sec) < min_time_gap_sec:

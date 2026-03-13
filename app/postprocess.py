@@ -162,6 +162,7 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
         groups,
         key=lambda group: (
             len(group),
+            -min(_text_noise_count(item.text) for item in group),
             sum(item.confidence or 0.0 for item in group),
             max(len(normalize_text(item.text)) for item in group),
         ),
@@ -171,8 +172,8 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
         chosen = max(
             best_group,
             key=lambda item: (
+                -_text_noise_count(item.text),
                 item.confidence or 0.0,
-                -_line_noise_count(item.text),
                 len(normalize_text(item.text)),
             ),
         )
@@ -255,11 +256,16 @@ def _choose_consensus_line(candidates: list[tuple[str, float]]) -> str:
         else:
             matched_group.append(candidate)
 
-    def group_score(group: list[tuple[str, float]]) -> tuple[int, float, int]:
-        return (len(group), sum(conf for _, conf in group), max(len(text) for text, _ in group))
+    def group_score(group: list[tuple[str, float]]) -> tuple[int, int, float, int]:
+        return (
+            len(group),
+            -min(_line_noise_count(text) for text, _ in group),
+            sum(conf for _, conf in group),
+            max(len(text) for text, _ in group),
+        )
 
     best_group = max(groups, key=group_score)
-    return max(best_group, key=lambda item: (item[1], len(item[0])))[0]
+    return max(best_group, key=lambda item: (-_line_noise_count(item[0]), item[1], len(item[0])))[0]
 
 
 def _line_similarity(left: str, right: str) -> float:
@@ -332,6 +338,10 @@ def _average_confidence(snapshots: list[Snapshot]) -> float | None:
     if not confidences:
         return None
     return round(sum(confidences) / len(confidences), 4)
+
+
+def _text_noise_count(text: str) -> int:
+    return sum(_line_noise_count(line) for line in text.splitlines())
 
 
 def _line_noise_count(text: str) -> int:

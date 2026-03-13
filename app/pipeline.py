@@ -4,6 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from .downloader import download_video
 from .exporters import write_outputs
 from .frame_sampler import merge_adjacent_visual_segments, sample_video_segments
@@ -11,9 +14,10 @@ from .models import TranscriptSegment, TranscriptionResult
 from .ocr_engine import OcrEngine
 from .postprocess import consolidate_ocr_candidates, harmonize_segment_lines, merge_adjacent_similar_segments
 from .text_corrections import apply_text_corrections, load_text_corrections
-from .utils import detect_platform, ensure_directory, is_url, safe_stem_from_input
+from .utils import detect_platform, ensure_directory, is_url, normalize_text, safe_stem_from_input
 
 StatusCallback = Callable[[str], None]
+FrameSignature = tuple[int, int, bytes]
 
 
 @dataclass
@@ -41,7 +45,7 @@ def resolve_video_path(
 
     local_path = Path(input_ref).expanduser().resolve()
     if not local_path.exists():
-        raise FileNotFoundError(f"入力ファイルが見つかりません: {local_path}")
+        raise FileNotFoundError(f"??????????????: {local_path}")
     return local_path, False
 
 
@@ -60,9 +64,9 @@ def run_single_input(
 
     platform = detect_platform(input_ref)
     if is_url(input_ref):
-        _report_status(status_callback, f"動画URLを取得しています: {platform}")
+        _report_status(status_callback, f"??URL????????: {platform}")
     else:
-        _report_status(status_callback, "ローカル動画を読み込んでいます")
+        _report_status(status_callback, "???????????????")
 
     video_path, was_downloaded = resolve_video_path(
         input_ref=input_ref,
@@ -70,7 +74,7 @@ def run_single_input(
         cookies_file=options.cookies_file,
     )
 
-    _report_status(status_callback, "画像の切り替えを解析しています")
+    _report_status(status_callback, "????????????????")
     visual_segments, duration_sec = sample_video_segments(
         video_path=video_path,
         sample_fps=options.sample_fps,
@@ -80,7 +84,6 @@ def run_single_input(
     )
     visual_segments = merge_adjacent_visual_segments(visual_segments)
 
-    _report_status(status_callback, f"OCRを実行しています: {len(visual_segments)} セグメント")
     segments = _extract_segments(
         ocr_engine=ocr_engine,
         visual_segments=visual_segments,
@@ -92,7 +95,7 @@ def run_single_input(
     ocr_hits = len(segments)
     if not segments and options.retry_on_empty:
         fallback_used = True
-        _report_status(status_callback, "結果が空だったため、より細かい設定で再試行しています")
+        _report_status(status_callback, "??????????????????????????")
         retry_visual_segments, _ = sample_video_segments(
             video_path=video_path,
             sample_fps=max(options.sample_fps, 5.0),
@@ -120,7 +123,10 @@ def run_single_input(
         )
         for segment in segments
     ]
-    merged_segments = merge_adjacent_similar_segments(corrected_segments)
+    merged_segments = merge_adjacent_similar_segments(
+        corrected_segments,
+        similarity_threshold=options.similarity_threshold,
+    )
     harmonized_segments = harmonize_segment_lines(merged_segments)
 
     result = TranscriptionResult(
@@ -135,7 +141,7 @@ def run_single_input(
     )
 
     stem = safe_stem_from_input(input_ref)
-    _report_status(status_callback, "出力ファイルを書き出しています")
+    _report_status(status_callback, "??????????????")
     paths = write_outputs(
         result=result,
         output_dir=output_dir,
@@ -149,7 +155,7 @@ def run_single_input(
         except OSError:
             pass
 
-    _report_status(status_callback, "完了しました")
+    _report_status(status_callback, "??????")
     return result, paths
 
 
@@ -161,23 +167,53 @@ def _extract_segments(
     if not visual_segments:
         return []
 
-    frames_to_ocr = []
-    frame_spans: list[tuple[int, int]] = []
-    for segment in visual_segments:
-        candidate_frames = segment.candidate_frames or [segment.frame]
-        start = len(frames_to_ocr)
-        frames_to_ocr.extend(candidate_frames)
-        frame_spans.append((start, len(candidate_frames)))
-
+    ocr_cache: dict[FrameSignature, tuple[str, float | None]] = {}
+    representative_frames = [segment.frame for segment in visual_segments]
     _report_status(
         status_callback,
-        f"OCR中: {len(visual_segments)} セグメント / {len(frames_to_ocr)} フレーム",
+        f"OCR?: {len(visual_segments)} ????? / {len(representative_frames)} ??????",
     )
-    batch_results = ocr_engine.extract_text_batch(frames_to_ocr)
+    primary_results = _extract_results_for_frames(
+        ocr_engine=ocr_engine,
+        frames=representative_frames,
+        memo=ocr_cache,
+    )
+
+    rescue_plan: list[tuple[int, list[object]]] = []
+    rescue_frames: list[object] = []
+    for segment_index, (segment, primary_result) in enumerate(zip(visual_segments, primary_results)):
+        additional_frames = _select_additional_candidate_frames(segment)
+        if not additional_frames:
+            continue
+        if not _should_rescue_segment(primary_result):
+            continue
+        rescue_plan.append((segment_index, additional_frames))
+        rescue_frames.extend(additional_frames)
+
+    rescue_results: list[tuple[str, float | None]] = []
+    if rescue_frames:
+        _report_status(
+            status_callback,
+            f"OCR???: {len(rescue_plan)} ????? / {len(rescue_frames)} ??????",
+        )
+        rescue_results = _extract_results_for_frames(
+            ocr_engine=ocr_engine,
+            frames=rescue_frames,
+            memo=ocr_cache,
+        )
+
+    rescue_results_by_segment: dict[int, list[tuple[str, float | None]]] = {}
+    rescue_offset = 0
+    for segment_index, additional_frames in rescue_plan:
+        next_offset = rescue_offset + len(additional_frames)
+        rescue_results_by_segment[segment_index] = rescue_results[rescue_offset:next_offset]
+        rescue_offset = next_offset
 
     segments: list[TranscriptSegment] = []
-    for visual_segment, (start, length) in zip(visual_segments, frame_spans):
-        text, confidence = consolidate_ocr_candidates(batch_results[start : start + length])
+    for segment_index, visual_segment in enumerate(visual_segments):
+        candidate_results = [primary_results[segment_index]]
+        candidate_results.extend(rescue_results_by_segment.get(segment_index, []))
+        text, confidence = consolidate_ocr_candidates(candidate_results)
         if not text:
             continue
         segments.append(
@@ -189,6 +225,105 @@ def _extract_segments(
             )
         )
     return segments
+
+
+def _extract_results_for_frames(
+    ocr_engine: OcrEngine,
+    frames: list[object],
+    memo: dict[FrameSignature, tuple[str, float | None]],
+) -> list[tuple[str, float | None]]:
+    if not frames:
+        return []
+
+    results: list[tuple[str, float | None] | None] = [None] * len(frames)
+    unique_frames: list[object] = []
+    unique_keys: list[FrameSignature] = []
+    unique_slots: list[list[int]] = []
+    pending_by_key: dict[FrameSignature, int] = {}
+
+    for index, frame in enumerate(frames):
+        key = _frame_signature_key(frame)
+        cached = memo.get(key)
+        if cached is not None:
+            results[index] = cached
+            continue
+
+        pending_index = pending_by_key.get(key)
+        if pending_index is not None:
+            unique_slots[pending_index].append(index)
+            continue
+
+        pending_by_key[key] = len(unique_frames)
+        unique_frames.append(frame)
+        unique_keys.append(key)
+        unique_slots.append([index])
+
+    if unique_frames:
+        extracted = ocr_engine.extract_text_batch(unique_frames)
+        for key, slots, result in zip(unique_keys, unique_slots, extracted):
+            memo[key] = result
+            for index in slots:
+                results[index] = result
+
+    return [result if result is not None else ("", None) for result in results]
+
+
+def _should_rescue_segment(result: tuple[str, float | None]) -> bool:
+    text, confidence = result
+    normalized = normalize_text(text)
+    if not normalized:
+        return True
+
+    line_count = len([line for line in text.splitlines() if normalize_text(line)])
+    char_count = len(normalized.replace(" ", ""))
+    noise_count = _text_noise_count(text)
+    return (
+        confidence is None
+        or confidence < 0.74
+        or line_count <= 1
+        or (line_count <= 2 and char_count < 18)
+        or noise_count >= 2
+    )
+
+
+def _select_additional_candidate_frames(segment, max_frames: int = 2) -> list[object]:
+    primary_key = _frame_signature_key(segment.frame)
+    seen_keys: set[FrameSignature] = {primary_key}
+    scored_frames: list[tuple[float, object]] = []
+
+    for frame in segment.candidate_frames:
+        key = _frame_signature_key(frame)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        scored_frames.append((_frame_difference_score(segment.frame, frame), frame))
+
+    scored_frames.sort(key=lambda item: item[0], reverse=True)
+    return [frame for _, frame in scored_frames[:max_frames]]
+
+
+def _frame_signature_key(frame) -> FrameSignature:
+    small = _small_grayscale(frame, size=40)
+    height, width = frame.shape[:2]
+    return height, width, small.tobytes()
+
+
+def _frame_difference_score(left_frame, right_frame) -> float:
+    left_small = _small_grayscale(left_frame, size=40).astype(np.float32) / 255.0
+    right_small = _small_grayscale(right_frame, size=40).astype(np.float32) / 255.0
+    return float(np.mean(np.abs(left_small - right_small)))
+
+
+def _small_grayscale(frame, size: int) -> np.ndarray:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def _text_noise_count(text: str) -> int:
+    return sum(char in "|[]{}<>~`" for char in text) + sum(
+        char.isascii() and not (char.isalnum() or char.isspace() or char in "!?.,:;/-_()#%&\'\"")
+        for char in text
+    )
 
 
 def _report_status(callback: StatusCallback | None, message: str) -> None:

@@ -176,3 +176,15 @@ def test_merge_adjacent_similar_segments_absorbs_short_title_matched_intro():
     assert len(segments) == 1
     assert segments[0].start_sec == 0.0
     assert segments[0].end_sec == 2.5
+
+
+def test_consolidate_ocr_candidates_prefers_cleaner_line_when_confidence_is_close():
+    text, confidence = consolidate_ocr_candidates(
+        [
+            ("??LINE??", 0.84),
+            ("??L1NE?? |", 0.85),
+        ]
+    )
+
+    assert text == "??LINE??"
+    assert confidence == 0.845

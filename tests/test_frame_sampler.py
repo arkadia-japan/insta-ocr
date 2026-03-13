@@ -1,6 +1,7 @@
+import cv2
 import numpy as np
 
-from app.frame_sampler import VisualSegment, _should_start_new_segment, merge_adjacent_visual_segments
+from app.frame_sampler import VisualSegment, _frame_quality_score, _should_start_new_segment, merge_adjacent_visual_segments
 
 
 def test_should_start_new_segment_when_visual_change_is_large():
@@ -45,3 +46,11 @@ def test_merge_adjacent_visual_segments_collapses_nearly_identical_frames():
     assert len(merged) == 2
     assert merged[0].start_sec == 0.0
     assert merged[0].end_sec == 2.0
+
+
+def test_frame_quality_score_prefers_clear_text_frame():
+    clear_frame = np.zeros((160, 160, 3), dtype=np.uint8)
+    cv2.putText(clear_frame, "TEXT", (12, 92), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 255), 3, cv2.LINE_AA)
+    blurred_frame = cv2.GaussianBlur(clear_frame, (9, 9), 0)
+
+    assert _frame_quality_score(clear_frame) > _frame_quality_score(blurred_frame)

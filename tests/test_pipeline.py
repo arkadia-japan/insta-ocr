@@ -1,17 +1,43 @@
-from types import SimpleNamespace
+import numpy as np
 
-from app.pipeline import ProcessingOptions, _should_reuse_previous_result
-
-
-def test_should_reuse_previous_result_when_frame_changes_are_small():
-    sample = SimpleNamespace(scene_delta=0.03, text_delta=0.01)
-    options = ProcessingOptions()
-
-    assert _should_reuse_previous_result(sample, ("同じテキスト", 0.9), options) is True
+from app.frame_sampler import VisualSegment
+from app.pipeline import _extract_segments
 
 
-def test_should_not_reuse_previous_result_when_text_change_is_large():
-    sample = SimpleNamespace(scene_delta=0.03, text_delta=0.05)
-    options = ProcessingOptions()
+class FakeOcrEngine:
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls: list[list[int]] = []
 
-    assert _should_reuse_previous_result(sample, ("別テキスト", 0.9), options) is False
+    def extract_text_batch(self, frames):
+        frame_ids = [int(frame[0, 0, 0]) for frame in frames]
+        self.calls.append(frame_ids)
+        return [self.mapping[frame_id] for frame_id in frame_ids]
+
+
+def _frame(frame_id: int) -> np.ndarray:
+    return np.full((8, 8, 3), frame_id, dtype=np.uint8)
+
+
+def test_extract_segments_uses_representative_frames_first_and_reuses_cached_rescue_results():
+    engine = FakeOcrEngine(
+        {
+            10: ("Strong title\nLine A\nLine B", 0.93),
+            20: ("Slide title", 0.58),
+            21: ("Slide title\nLine A\nLine B\nCall to action", 0.88),
+        }
+    )
+    segments = [
+        VisualSegment(0.0, 1.0, 0.2, 0.12, 0.05, 10.0, _frame(10), [_frame(10), _frame(11)]),
+        VisualSegment(1.0, 2.0, 1.2, 0.18, 0.08, 9.0, _frame(20), [_frame(20), _frame(21)]),
+        VisualSegment(2.0, 3.0, 2.2, 0.14, 0.04, 9.5, _frame(21), [_frame(21)]),
+    ]
+
+    transcript_segments = _extract_segments(engine, segments)
+
+    assert engine.calls == [[10, 20, 21]]
+    assert [segment.text for segment in transcript_segments] == [
+        "Strong title\nLine A\nLine B",
+        "Slide title\nLine A\nLine B\nCall to action",
+        "Slide title\nLine A\nLine B\nCall to action",
+    ]
