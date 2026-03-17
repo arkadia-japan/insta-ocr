@@ -1,39 +1,31 @@
-# Web UI の簡単な起動方法
+# Web UI の起動
 
-## いちばん簡単な方法
+## 推奨手順
 
-プロジェクト直下にある `start_web_ui.bat` をダブルクリックしてください。
+1. `D:\バイブコーディング\shorts-visual-transcriber` を開く
+2. `start_web_ui.bat` をダブルクリックする
+3. ブラウザで `http://localhost:8501` を開く
 
-初回:
-- Python の確認
-- 仮想環境 `.venv` の作成
-- 必要パッケージのインストール
+`Instagram Reel全文` は音声認識、`汎用OCR` は画面テキスト抽出として使い分けます。
 
-2回目以降:
-- `start_web_ui.bat` をダブルクリックするだけで起動できます
+## この起動スクリプトが行うこと
 
-## 起動後
+- `.venv311` を優先して使う
+- `streamlit -> faster_whisper -> cv2 -> yt_dlp -> numpy -> paddleocr -> paddle` の順で依存チェックする
+- `localhost:8501` の既存 Web UI を検知する
+- `C:\Users\Public\shorts_visual_transcriber_runtime` を runtime ルートに使う
+- `/_stcore/health` が `ok` になるまで待ってからブラウザを開く
+- ログを `C:\Users\Public\shorts_visual_transcriber_runtime\logs\web_ui_latest.log` に出す
+- 起動に失敗してもウィンドウを閉じず、そのまま原因を確認できるようにする
 
-ブラウザで次のURLが開きます。
+## うまく起動しない場合
 
-```text
-http://localhost:8501
-```
+- 古い Streamlit / Python プロセスが残っていないか確認する
+- `C:\Users\Public\shorts_visual_transcriber_runtime\logs\web_ui_latest.log` を確認する
+- すでに `8501` が使われている場合は既存 Web UI の再利用が優先される
+- `Instagram Reel全文` でエラーが出る場合は、URL が `https://www.instagram.com/reel/.../` 形式か確認する
+- 音声トラックのない Reel は文字起こしできない
 
-もし自動で開かない場合は、手動で上のURLを開いてください。
+## 停止方法
 
-## 終了方法
-
-起動した黒い画面で `Ctrl + C` を押してください。
-
-## PowerShell から起動する場合
-
-```powershell
-cd "D:\バイブコーディング\shorts-visual-transcriber"
-.\start_web_ui.bat
-```
-
-## 補足
-
-- 依存パッケージが足りない場合は、起動スクリプトが自動で `requirements.txt` を使って補います
-- 仮想環境は `.venv` に作られます
+- 起動した `cmd` ウィンドウで `Ctrl + C`

@@ -104,6 +104,21 @@ def test_harmonize_segment_lines_does_not_merge_similar_lines_inside_one_segment
     assert harmonized[0].text == "Has his own axis\nHas his own time"
 
 
+def test_harmonize_segment_lines_preserves_blank_lines():
+    harmonized = harmonize_segment_lines(
+        [
+            TranscriptSegment(
+                start_sec=0.0,
+                end_sec=2.0,
+                text="タイトル\n\n左列\n\n右列",
+                confidence=0.9,
+            )
+        ]
+    )
+
+    assert harmonized[0].text == "タイトル\n\n左列\n\n右列"
+
+
 def test_consolidate_ocr_candidates_prefers_consensus():
     text, confidence = consolidate_ocr_candidates(
         [
@@ -188,3 +203,25 @@ def test_consolidate_ocr_candidates_prefers_cleaner_line_when_confidence_is_clos
 
     assert text == "??LINE??"
     assert confidence == 0.845
+
+
+def test_consolidate_ocr_candidates_dedupes_repeated_lines():
+    text, confidence = consolidate_ocr_candidates(
+        [
+            ("タイトル\nCTA\nCTA", 0.8),
+        ]
+    )
+
+    assert text == "タイトル\nCTA"
+    assert confidence == 0.8
+
+
+def test_consolidate_ocr_candidates_preserves_intentional_blank_lines_for_single_candidate():
+    text, confidence = consolidate_ocr_candidates(
+        [
+            ("タイトル\n\n左列\n\n右列\n\nCTA", 0.8),
+        ]
+    )
+
+    assert text == "タイトル\n\n左列\n\n右列\n\nCTA"
+    assert confidence == 0.8

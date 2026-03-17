@@ -30,6 +30,7 @@ class TranscriptionResult:
     ocr_hits: int
     fallback_used: bool
     segments: list[TranscriptSegment]
+    transcription_mode: str = "ocr"
 
     def to_full_text(self, include_timestamps: bool = False) -> str:
         blocks: list[str] = []
@@ -56,6 +57,7 @@ class TranscriptionResult:
             "sampled_frames": self.sampled_frames,
             "ocr_hits": self.ocr_hits,
             "fallback_used": self.fallback_used,
+            "transcription_mode": self.transcription_mode,
             "segments": [
                 {
                     "start_sec": round(segment.start_sec, 3),

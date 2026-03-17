@@ -18,6 +18,7 @@ def test_to_full_text_skips_adjacent_duplicate_segments():
     )
 
     assert result.to_full_text() == "1行目\n2行目\n\n3行目"
+    assert result.to_dict()["transcription_mode"] == "ocr"
 
 
 def test_to_full_text_with_timestamps_includes_time_range():

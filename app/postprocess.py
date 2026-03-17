@@ -119,16 +119,26 @@ def harmonize_segment_lines(segments: list[TranscriptSegment]) -> list[Transcrip
 
     harmonized: list[TranscriptSegment] = []
     for segment_index, segment in enumerate(segments):
-        lines = [normalize_text(line) for line in segment.text.splitlines() if normalize_text(line)]
+        raw_lines = segment.text.splitlines()
+        lines = [normalize_text(line) for line in raw_lines if normalize_text(line)]
         updated_lines = [
             best_text_by_key.get((segment_index, line_index), line)
             for line_index, line in enumerate(lines)
         ]
+        reconstructed_lines: list[str] = []
+        updated_index = 0
+        for raw_line in raw_lines:
+            normalized = normalize_text(raw_line)
+            if not normalized:
+                reconstructed_lines.append("")
+                continue
+            reconstructed_lines.append(updated_lines[updated_index])
+            updated_index += 1
         harmonized.append(
             TranscriptSegment(
                 start_sec=segment.start_sec,
                 end_sec=segment.end_sec,
-                text="\n".join(updated_lines),
+                text=_dedupe_text_lines("\n".join(reconstructed_lines)),
                 confidence=segment.confidence,
             )
         )
@@ -144,7 +154,7 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
     if not snapshots:
         return "", None
     if len(snapshots) == 1:
-        return snapshots[0].text, snapshots[0].confidence
+        return _dedupe_text_lines(snapshots[0].text), snapshots[0].confidence
 
     groups: list[list[Snapshot]] = []
     for snapshot in snapshots:
@@ -178,7 +188,7 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
             ),
         )
         consensus_text = chosen.text
-    return consensus_text, _average_confidence(best_group)
+    return _dedupe_text_lines(consensus_text), _average_confidence(best_group)
 
 
 def merge_adjacent_similar_segments(
@@ -338,6 +348,26 @@ def _average_confidence(snapshots: list[Snapshot]) -> float | None:
     if not confidences:
         return None
     return round(sum(confidences) / len(confidences), 4)
+
+
+def _dedupe_text_lines(text: str) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in text.splitlines():
+        line = normalize_text(raw_line)
+        if not line:
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _text_noise_count(text: str) -> int:

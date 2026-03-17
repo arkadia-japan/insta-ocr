@@ -1,18 +1,19 @@
 import numpy as np
 
 from app.frame_sampler import VisualSegment
-from app.pipeline import _extract_segments
+from app.pipeline import _extract_results_for_frames, _extract_segments
 
 
 class FakeOcrEngine:
     def __init__(self, mapping):
         self.mapping = mapping
-        self.calls: list[list[int]] = []
+        self.calls: list[tuple[str, list[int]]] = []
 
     def extract_text_batch(self, frames):
         frame_ids = [int(frame[0, 0, 0]) for frame in frames]
-        self.calls.append(frame_ids)
+        self.calls.append(("full", frame_ids))
         return [self.mapping[frame_id] for frame_id in frame_ids]
+
 
 
 def _frame(frame_id: int) -> np.ndarray:
@@ -35,9 +36,23 @@ def test_extract_segments_uses_representative_frames_first_and_reuses_cached_res
 
     transcript_segments = _extract_segments(engine, segments)
 
-    assert engine.calls == [[10, 20, 21]]
+    assert engine.calls == [("full", [10, 20, 21])]
     assert [segment.text for segment in transcript_segments] == [
         "Strong title\nLine A\nLine B",
         "Slide title\nLine A\nLine B\nCall to action",
         "Slide title\nLine A\nLine B\nCall to action",
     ]
+
+
+def test_extract_results_for_frames_uses_full_batch_when_fast_batch_is_unavailable():
+    engine = FakeOcrEngine({30: ("Supplemental text", 0.8)})
+
+    results = _extract_results_for_frames(
+        ocr_engine=engine,
+        frames=[_frame(30)],
+        memo={},
+        fast_only=True,
+    )
+
+    assert results == [("Supplemental text", 0.8)]
+    assert engine.calls == [("full", [30])]

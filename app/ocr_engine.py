@@ -7,6 +7,7 @@ from typing import Iterable
 
 import cv2
 
+from .runtime_paths import configure_paddle_runtime_env
 from .utils import normalize_text
 
 
@@ -54,15 +55,56 @@ class OcrEngine:
         gpu: bool = False,
         min_confidence: float = 0.15,
     ) -> None:
-        try:
-            import easyocr
-        except ImportError as exc:
-            raise RuntimeError(
-                "easyocr is not installed. Run: pip install -r requirements.txt"
-            ) from exc
-
-        self.reader = easyocr.Reader(list(languages), gpu=gpu, verbose=False)
+        self.languages = [token.strip().lower() for token in languages if token.strip()]
         self.min_confidence = min_confidence
+        self.gpu = gpu
+        self._backend_name = ""
+
+        paddle_error: Exception | None = None
+        try:
+            self._init_paddle_backend()
+            self._backend_name = "paddle"
+            return
+        except Exception as exc:  # pragma: no cover - fallback path is environment-specific
+            paddle_error = exc
+
+        try:
+            self._init_easyocr_backend()
+            self._backend_name = "easyocr"
+        except ImportError as exc:  # pragma: no cover - fallback path is environment-specific
+            message = "OCR backend could not be initialized."
+            if paddle_error is not None:
+                message += f" paddleocr error: {paddle_error!s}"
+            raise RuntimeError(message) from exc
+
+    def _init_paddle_backend(self) -> None:
+        configure_paddle_runtime_env()
+
+        from paddleocr import PaddleOCR
+
+        det_model_name, rec_model_name = self._resolve_paddle_model_names()
+        self.paddle_reader = PaddleOCR(
+            text_detection_model_name=det_model_name,
+            text_recognition_model_name=rec_model_name,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            enable_mkldnn=False,
+            enable_hpi=False,
+            cpu_threads=4,
+            text_rec_score_thresh=0.0,
+        )
+
+    def _init_easyocr_backend(self) -> None:
+        import easyocr
+
+        self.reader = easyocr.Reader(list(self.languages or ("ja", "en")), gpu=self.gpu, verbose=False)
+
+    def _resolve_paddle_model_names(self) -> tuple[str, str]:
+        has_japanese = "ja" in self.languages or "japan" in self.languages
+        if has_japanese:
+            return "PP-OCRv5_mobile_det", "japan_PP-OCRv3_mobile_rec"
+        return "PP-OCRv5_mobile_det", "en_PP-OCRv5_mobile_rec"
 
     @staticmethod
     def _grayscale(frame, scale: float = 2.25):
@@ -126,6 +168,13 @@ class OcrEngine:
         enhanced = self._enhance_gray(gray)
         return OcrView(image=enhanced, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=1)
 
+    def _build_paddle_primary_view(self, frame) -> OcrView:
+        crop, cx, cy, cw, ch = self._crop(frame, 0.02, 0.02, 0.98, 0.985)
+        return OcrView(image=crop, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=0)
+
+    def _build_paddle_secondary_view(self, frame) -> OcrView:
+        return OcrView(image=frame, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=1)
+
     def _readtext(self, image):
         return self.reader.readtext(
             image,
@@ -158,9 +207,15 @@ class OcrEngine:
             mag_ratio=1.2,
         )
 
-    def _readtext_batched_fast(self, images: list[object]):
+    def _readtext_batched_fast(
+        self,
+        images: list[object],
+        *,
+        canvas_size: int = 1600,
+        mag_ratio: float = 1.1,
+        chunk_size: int = 4,
+    ):
         results = []
-        chunk_size = 2
         for start in range(0, len(images), chunk_size):
             chunk = images[start : start + chunk_size]
             results.extend(
@@ -177,8 +232,8 @@ class OcrEngine:
                     text_threshold=0.6,
                     low_text=0.3,
                     link_threshold=0.3,
-                    canvas_size=1600,
-                    mag_ratio=1.1,
+                    canvas_size=canvas_size,
+                    mag_ratio=mag_ratio,
                 )
             )
         return results
@@ -224,35 +279,153 @@ class OcrEngine:
 
         return self._merge_fragments_into_lines(fragments=fragments, variant_rank=view.rank)
 
+    def _predict_paddle_batch(self, images: list[object]) -> list[object]:
+        if not images:
+            return []
+        return list(self.paddle_reader.predict(images))
+
+    def _extract_paddle_candidates(self, raw_result: object, view: OcrView) -> list[OcrCandidate]:
+        if not raw_result:
+            return []
+
+        image_height, image_width = view.image.shape[:2]
+        texts = raw_result.get("rec_texts") or []
+        scores = raw_result.get("rec_scores") or []
+        polygons = raw_result.get("rec_polys") or raw_result.get("dt_polys") or []
+
+        candidates: list[OcrCandidate] = []
+        for raw_text, raw_score, polygon in zip(texts, scores, polygons):
+            text = normalize_text(raw_text)
+            confidence = float(raw_score)
+            if not text or confidence < self.min_confidence:
+                continue
+            points = polygon.tolist() if hasattr(polygon, "tolist") else polygon
+            xs = [float(point[0]) for point in points]
+            ys = [float(point[1]) for point in points]
+            x_center = view.x_offset + (((min(xs) + max(xs)) / 2.0) / image_width) * view.x_scale
+            y_center = view.y_offset + (((min(ys) + max(ys)) / 2.0) / image_height) * view.y_scale
+            candidates.append(
+                OcrCandidate(
+                    text=text,
+                    confidence=confidence,
+                    x_center=x_center,
+                    y_center=y_center,
+                    variant_rank=view.rank,
+                )
+            )
+        return candidates
+
+    def _extract_text_primary_batch_paddle(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        if not frames:
+            return []
+
+        views = [self._build_paddle_primary_view(frame) for frame in frames]
+        raw_batches = self._predict_paddle_batch([view.image for view in views])
+        return [
+            self._finalize_candidates(self._extract_paddle_candidates(raw_result=raw_result, view=view))
+            for view, raw_result in zip(views, raw_batches)
+        ]
+
+    def _extract_text_batch_paddle(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        if not frames:
+            return []
+
+        primary_views = [self._build_paddle_primary_view(frame) for frame in frames]
+        primary_batches = self._predict_paddle_batch([view.image for view in primary_views])
+
+        candidates_by_index: list[list[OcrCandidate]] = []
+        primary_results: list[tuple[str, float | None]] = []
+        rescue_indices: list[int] = []
+
+        for index, (view, raw_result) in enumerate(zip(primary_views, primary_batches)):
+            candidates = self._extract_paddle_candidates(raw_result=raw_result, view=view)
+            primary_result = self._finalize_candidates(candidates)
+            candidates_by_index.append(candidates)
+            primary_results.append(primary_result)
+            if self._needs_fast_rescue(primary_result):
+                rescue_indices.append(index)
+
+        if rescue_indices:
+            rescue_views = [self._build_paddle_secondary_view(frames[index]) for index in rescue_indices]
+            rescue_batches = self._predict_paddle_batch([view.image for view in rescue_views])
+            for frame_index, view, raw_result in zip(rescue_indices, rescue_views, rescue_batches):
+                candidates_by_index[frame_index].extend(
+                    self._extract_paddle_candidates(raw_result=raw_result, view=view)
+                )
+                primary_results[frame_index] = self._finalize_candidates(candidates_by_index[frame_index])
+
+        return primary_results
+
     def extract_text(self, frame) -> tuple[str, float | None]:
+        if getattr(self, "_backend_name", "") == "paddle":
+            return self._extract_text_batch_paddle([frame])[0]
+
         candidates: list[OcrCandidate] = []
         for view in self._build_views(frame):
             candidates.extend(self._extract_from_view(view))
 
-        merged = self._merge_candidates(candidates)
-        if not merged:
-            return "", None
+        return self._finalize_candidates(candidates)
 
-        ordered = sorted(merged, key=lambda item: (item.y_center, item.x_center))
-        merged_text = "\n".join(candidate.text for candidate in ordered)
-        avg_confidence = sum(candidate.confidence for candidate in ordered) / len(ordered)
-        return merged_text, round(avg_confidence, 4)
+    def extract_text_primary_batch(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        if getattr(self, "_backend_name", "") == "paddle":
+            return self._extract_text_primary_batch_paddle(frames)
 
-    def extract_text_batch(self, frames: list[object]) -> list[tuple[str, float | None]]:
         if not frames:
             return []
 
         primary_views = [self._build_primary_view(frame) for frame in frames]
-        raw_batches = self._readtext_batched_fast([view.image for view in primary_views])
+        raw_batches = self._readtext_batched_fast(
+            [view.image for view in primary_views],
+            canvas_size=1600,
+            mag_ratio=1.1,
+        )
 
         results: list[tuple[str, float | None]] = []
-        for frame, view, raw_results in zip(frames, primary_views, raw_batches):
+        for view, raw_results in zip(primary_views, raw_batches):
+            candidates = self._extract_candidates_from_results(raw_results=raw_results, view=view)
+            results.append(self._finalize_candidates(candidates))
+        return results
+
+    def extract_text_batch(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        if getattr(self, "_backend_name", "") == "paddle":
+            return self._extract_text_batch_paddle(frames)
+
+        if not frames:
+            return []
+
+        primary_views = [self._build_primary_view(frame) for frame in frames]
+        raw_batches = self._readtext_batched_fast(
+            [view.image for view in primary_views],
+            canvas_size=1600,
+            mag_ratio=1.1,
+        )
+
+        candidates_by_index: list[list[OcrCandidate]] = []
+        fast_results: list[tuple[str, float | None]] = []
+        rescue_indices: list[int] = []
+
+        for index, (view, raw_results) in enumerate(zip(primary_views, raw_batches)):
             candidates = self._extract_candidates_from_results(raw_results=raw_results, view=view)
             fast_result = self._finalize_candidates(candidates)
+            candidates_by_index.append(candidates)
+            fast_results.append(fast_result)
             if self._needs_fast_rescue(fast_result):
-                secondary_view = self._build_secondary_fast_view(frame)
-                candidates.extend(self._extract_from_view_fast(secondary_view))
-                fast_result = self._finalize_candidates(candidates)
+                rescue_indices.append(index)
+
+        if rescue_indices:
+            secondary_views = [self._build_secondary_fast_view(frames[index]) for index in rescue_indices]
+            secondary_batches = self._readtext_batched_fast(
+                [view.image for view in secondary_views],
+                canvas_size=1920,
+                mag_ratio=1.2,
+            )
+            for frame_index, view, raw_results in zip(rescue_indices, secondary_views, secondary_batches):
+                candidates = candidates_by_index[frame_index]
+                candidates.extend(self._extract_candidates_from_results(raw_results=raw_results, view=view))
+                fast_results[frame_index] = self._finalize_candidates(candidates)
+
+        results: list[tuple[str, float | None]] = []
+        for frame, fast_result in zip(frames, fast_results):
             if self._needs_fallback(fast_result):
                 results.append(self.extract_text(frame))
             else:
@@ -265,9 +438,11 @@ class OcrEngine:
         if not merged:
             return "", None
 
-        ordered = sorted(merged, key=lambda item: (item.y_center, item.x_center))
-        merged_text = "\n".join(candidate.text for candidate in ordered)
-        avg_confidence = sum(candidate.confidence for candidate in ordered) / len(ordered)
+        blocks = OcrEngine._build_output_blocks(merged)
+        merged_text = OcrEngine._render_output_blocks(blocks)
+        avg_confidence = sum(candidate.confidence for candidate in merged) / len(merged)
+        if not merged_text:
+            return "", None
         return merged_text, round(avg_confidence, 4)
 
     @staticmethod
@@ -294,6 +469,137 @@ class OcrEngine:
             or confidence < 0.72
             or line_count < 3
         )
+
+    @classmethod
+    def _build_output_blocks(cls, candidates: list[OcrCandidate]) -> list[list[OcrCandidate]]:
+        ordered = sorted(candidates, key=lambda item: (item.y_center, item.x_center))
+        two_column_blocks = cls._split_two_column_blocks(ordered)
+        if two_column_blocks is not None:
+            return two_column_blocks
+        return [ordered]
+
+    @classmethod
+    def _split_two_column_blocks(
+        cls,
+        ordered: list[OcrCandidate],
+    ) -> list[list[OcrCandidate]] | None:
+        if len(ordered) < 7:
+            return None
+
+        y_values = [candidate.y_center for candidate in ordered]
+        min_y = min(y_values)
+        max_y = max(y_values)
+        y_span = max_y - min_y
+        if y_span < 0.18:
+            return None
+
+        top_cutoff = min_y + max(0.06, y_span * 0.12)
+        bottom_cutoff = max_y - max(0.08, y_span * 0.16)
+        centered = [candidate for candidate in ordered if 0.36 <= candidate.x_center <= 0.64]
+        title = [candidate for candidate in centered if candidate.y_center <= top_cutoff]
+        footer = [candidate for candidate in centered if candidate.y_center >= bottom_cutoff]
+
+        reserved_ids = {id(candidate) for candidate in title + footer}
+        body = [candidate for candidate in ordered if id(candidate) not in reserved_ids]
+        left = [candidate for candidate in body if candidate.x_center < 0.5]
+        right = [candidate for candidate in body if candidate.x_center >= 0.5]
+
+        if not cls._looks_like_two_column_layout(left=left, right=right):
+            return None
+
+        blocks = [title, left, right, footer]
+        return [
+            sorted(block, key=lambda item: (item.y_center, item.x_center))
+            for block in blocks
+            if block
+        ]
+
+    @staticmethod
+    def _looks_like_two_column_layout(
+        left: list[OcrCandidate],
+        right: list[OcrCandidate],
+    ) -> bool:
+        if len(left) < 3 or len(right) < 3:
+            return False
+
+        left_median_x = OcrEngine._median(candidate.x_center for candidate in left)
+        right_median_x = OcrEngine._median(candidate.x_center for candidate in right)
+        if left_median_x >= 0.44 or right_median_x <= 0.56:
+            return False
+
+        left_y = [candidate.y_center for candidate in left]
+        right_y = [candidate.y_center for candidate in right]
+        left_span = max(left_y) - min(left_y)
+        right_span = max(right_y) - min(right_y)
+        if left_span <= 0.05 or right_span <= 0.05:
+            return False
+
+        overlap = max(0.0, min(max(left_y), max(right_y)) - max(min(left_y), min(right_y)))
+        overlap_ratio = overlap / max(0.001, min(left_span, right_span))
+        return overlap_ratio >= 0.45
+
+    @staticmethod
+    def _median(values: Iterable[float]) -> float:
+        ordered = sorted(values)
+        if not ordered:
+            return 0.0
+        middle = len(ordered) // 2
+        if len(ordered) % 2 == 1:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+    @classmethod
+    def _render_output_blocks(cls, blocks: list[list[OcrCandidate]]) -> str:
+        rendered_lines: list[str] = []
+        for block in blocks:
+            block_lines = [
+                cleaned
+                for cleaned in (cls._clean_output_line(candidate.text) for candidate in block)
+                if cleaned
+            ]
+            block_lines = cls._dedupe_output_lines(block_lines)
+            if not block_lines:
+                continue
+            if rendered_lines:
+                rendered_lines.append("")
+            rendered_lines.extend(block_lines)
+
+        return "\n".join(cls._dedupe_output_lines(rendered_lines))
+
+    @staticmethod
+    def _clean_output_line(text: str) -> str:
+        cleaned = normalize_text(text)
+        cleaned = re.sub(r"^[・•●▪◦·･]+", "", cleaned)
+        cleaned = re.sub(r"^[\"'`´‘’]+(?=\S)", "", cleaned)
+        cleaned = re.sub(r"^\.\s*(?=[^0-9])", "", cleaned)
+        return normalize_text(cleaned)
+
+    @staticmethod
+    def _dedupe_output_lines(lines: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+
+        for line in lines:
+            normalized = normalize_text(line)
+            if not normalized:
+                if deduped and deduped[-1] != "":
+                    deduped.append("")
+                continue
+
+            if deduped and deduped[-1] and normalize_text(deduped[-1]) == normalized:
+                continue
+            if len(normalized) >= 3 and normalized in seen:
+                continue
+
+            deduped.append(normalized)
+            if len(normalized) >= 3:
+                seen.add(normalized)
+
+        while deduped and deduped[0] == "":
+            deduped.pop(0)
+        while deduped and deduped[-1] == "":
+            deduped.pop()
+        return deduped
 
     @classmethod
     def _merge_fragments_into_lines(

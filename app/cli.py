@@ -6,10 +6,13 @@ from pathlib import Path
 from .downloader import DownloadError
 from .ocr_engine import OcrEngine
 from .pipeline import ProcessingOptions, run_single_input
+from .runtime_paths import get_runtime_download_dir, get_runtime_output_dir
 from .utils import ensure_directory
 
 
 def build_parser() -> argparse.ArgumentParser:
+    default_output_dir = str(get_runtime_output_dir())
+    default_download_dir = str(get_runtime_download_dir())
     parser = argparse.ArgumentParser(
         description=(
             "Transcribe text shown in short-form videos (Instagram Reels, TikTok, YouTube Shorts) "
@@ -19,13 +22,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("inputs", nargs="+", help="Video URLs and/or local video file paths.")
     parser.add_argument(
         "--output-dir",
-        default="output",
-        help="Directory to store JSON/TXT/SRT files. Default: output",
+        default=default_output_dir,
+        help=f"Directory to store JSON/TXT/SRT files. Default: {default_output_dir}",
     )
     parser.add_argument(
         "--download-dir",
-        default="downloads",
-        help="Directory to store temporary downloaded videos. Default: downloads",
+        default=default_download_dir,
+        help=f"Directory to store temporary downloaded videos. Default: {default_download_dir}",
     )
     parser.add_argument(
         "--cookies-file",
@@ -97,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         json_indent=args.json_indent,
         keep_video=args.keep_video,
         cookies_file=Path(args.cookies_file).expanduser().resolve() if args.cookies_file else None,
+        runtime_video_dir=download_dir,
     )
 
     failures = 0

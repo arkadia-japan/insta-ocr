@@ -82,12 +82,16 @@ def sample_video_segments(
     frame_index = -1
 
     while True:
-        success, frame = cap.read()
-        if not success:
+        grabbed = cap.grab()
+        if not grabbed:
             break
         frame_index += 1
         if frame_index % frame_step != 0:
             continue
+
+        success, frame = cap.retrieve()
+        if not success:
+            break
 
         time_sec = frame_index / fps
         current_hist = _frame_histogram(frame)

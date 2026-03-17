@@ -13,6 +13,7 @@ from .frame_sampler import merge_adjacent_visual_segments, sample_video_segments
 from .models import TranscriptSegment, TranscriptionResult
 from .ocr_engine import OcrEngine
 from .postprocess import consolidate_ocr_candidates, harmonize_segment_lines, merge_adjacent_similar_segments
+from .runtime_paths import stage_video_for_runtime
 from .text_corrections import apply_text_corrections, load_text_corrections
 from .utils import detect_platform, ensure_directory, is_url, normalize_text, safe_stem_from_input
 
@@ -32,6 +33,7 @@ class ProcessingOptions:
     retry_on_empty: bool = True
     cookies_file: Path | None = None
     corrections_file: Path | None = None
+    runtime_video_dir: Path | None = None
 
 
 def resolve_video_path(
@@ -73,10 +75,14 @@ def run_single_input(
         download_dir=download_dir,
         cookies_file=options.cookies_file,
     )
+    processing_video_path = stage_video_for_runtime(
+        video_path=video_path,
+        runtime_video_dir=options.runtime_video_dir or download_dir,
+    )
 
     _report_status(status_callback, "????????????????")
     visual_segments, duration_sec = sample_video_segments(
-        video_path=video_path,
+        video_path=processing_video_path,
         sample_fps=options.sample_fps,
         scene_threshold=options.scene_threshold,
         text_change_threshold=options.text_change_threshold,
@@ -97,7 +103,7 @@ def run_single_input(
         fallback_used = True
         _report_status(status_callback, "??????????????????????????")
         retry_visual_segments, _ = sample_video_segments(
-            video_path=video_path,
+            video_path=processing_video_path,
             sample_fps=max(options.sample_fps, 5.0),
             scene_threshold=min(options.scene_threshold, 0.16),
             text_change_threshold=min(options.text_change_threshold, 0.035),
@@ -138,6 +144,7 @@ def run_single_input(
         ocr_hits=ocr_hits,
         fallback_used=fallback_used,
         segments=harmonized_segments,
+        transcription_mode="ocr",
     )
 
     stem = safe_stem_from_input(input_ref)
@@ -152,6 +159,11 @@ def run_single_input(
     if was_downloaded and not options.keep_video:
         try:
             video_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if processing_video_path != video_path:
+        try:
+            processing_video_path.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -182,10 +194,10 @@ def _extract_segments(
     rescue_plan: list[tuple[int, list[object]]] = []
     rescue_frames: list[object] = []
     for segment_index, (segment, primary_result) in enumerate(zip(visual_segments, primary_results)):
+        if not _should_rescue_segment(primary_result):
+            continue
         additional_frames = _select_additional_candidate_frames(segment)
         if not additional_frames:
-            continue
-        if not _should_rescue_segment(primary_result):
             continue
         rescue_plan.append((segment_index, additional_frames))
         rescue_frames.extend(additional_frames)
@@ -231,6 +243,7 @@ def _extract_results_for_frames(
     ocr_engine: OcrEngine,
     frames: list[object],
     memo: dict[FrameSignature, tuple[str, float | None]],
+    fast_only: bool = False,
 ) -> list[tuple[str, float | None]]:
     if not frames:
         return []
@@ -259,7 +272,10 @@ def _extract_results_for_frames(
         unique_slots.append([index])
 
     if unique_frames:
-        extracted = ocr_engine.extract_text_batch(unique_frames)
+        if fast_only and hasattr(ocr_engine, "extract_text_primary_batch"):
+            extracted = ocr_engine.extract_text_primary_batch(unique_frames)
+        else:
+            extracted = ocr_engine.extract_text_batch(unique_frames)
         for key, slots, result in zip(unique_keys, unique_slots, extracted):
             memo[key] = result
             for index in slots:

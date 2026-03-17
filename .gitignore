@@ -2,6 +2,7 @@
 .pytest_cache/
 *.pyc
 .venv/
+.venv311/
 env/
 streamlit_app.log
 .streamlit/
@@ -10,3 +11,6 @@ downloads/
 output/
 output_*/
 bench_*/
+.paddlex_cache/
+.paddlex_cache311/
+.paddlex_cache_simple/

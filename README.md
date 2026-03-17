@@ -1,131 +1,114 @@
 # shorts-visual-transcriber
 
-Instagram Reels / TikTok / YouTube Shorts などのショート動画を対象に、  
-画面内テキストをOCRで文字起こしするツールです。  
-音声認識ではなく、音声なし・BGMのみ動画の文字情報抽出に特化しています。
+Instagram Reel / TikTok / YouTube Shorts のような縦動画から全文を作成するツールです。
 
-## できること
+- `Instagram Reel全文` タブは音声認識 (`faster-whisper`) を使います
+- `汎用OCR` タブは画面内テキスト抽出 (`PaddleOCR`) を使います
+- Web UI は `Streamlit`、動画取得は `yt-dlp`、推奨 Python は `3.11` です
 
-- URL またはローカル動画ファイルを入力
-- 必要に応じて `yt-dlp` で動画を取得
-- シーン変化や時間間隔にもとづいてキーフレームを抽出
-- キーフレームにOCRを実行してテキスト化
-- 類似テキストを統合して時系列セグメント化
-- `JSON` / `TXT` / `SRT` で出力
+## 実行前提
 
-## この方式が音声なし動画に向いている理由
+このプロジェクトは日本語パスによるネイティブ依存の不具合を避けるため、実行時ファイルを ASCII パスへ逃がします。
 
-音声文字起こしは使わず、映像中の文字を直接抽出するためです。
+既定の runtime ディレクトリ:
 
-1. 代表フレームを抽出
-2. OCRで画面文字を読み取り
-3. タイムスタンプ付きで時系列化
+- `C:\Users\Public\shorts_visual_transcriber_runtime\downloads`
+- `C:\Users\Public\shorts_visual_transcriber_runtime\output`
+- `C:\Users\Public\shorts_visual_transcriber_runtime\logs`
+- `C:\Users\Public\shorts_visual_transcriber_runtime\paddlex_cache`
+- `C:\Users\Public\shorts_visual_transcriber_runtime\paddleocr`
+- `C:\Users\Public\shorts_visual_transcriber_runtime\faster_whisper`
 
-## 必要環境
+## クイックスタート
 
-- Python 3.11 以上
-- FFmpeg（`PATH` で実行可能）  
-  `yt-dlp` の互換性向上のため推奨
-- `yt-dlp`（`requirements.txt` に含む）
+最初は `start_web_ui.bat` を使うのが最も安全です。
 
-依存パッケージのインストール:
+```powershell
+cd "D:\バイブコーディング\shorts-visual-transcriber"
+cmd /c start_web_ui.bat
+```
 
-```bash
-pip install -r requirements.txt
+`start_web_ui.bat` は次を行います。
+
+1. `Python 3.11` と `.venv311` を確認
+2. 必要依存を確認し、足りなければインストール
+3. Paddle 系キャッシュを `C:\Users\Public\shorts_visual_transcriber_runtime` に向ける
+4. `localhost:8501` の既存 Web UI を検知
+5. `/_stcore/health` が `ok` になってからブラウザを開く
+6. ログを `C:\Users\Public\shorts_visual_transcriber_runtime\logs\web_ui_latest.log` に出力
+
+## 手動セットアップ
+
+```powershell
+cd "D:\バイブコーディング\shorts-visual-transcriber"
+py -3.11 -m venv .venv311
+.\.venv311\Scripts\python.exe -m pip install --upgrade pip
+.\.venv311\Scripts\python.exe -m pip install paddlepaddle==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+.\.venv311\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv311\Scripts\python.exe -m streamlit run web_ui.py
 ```
 
 ## Web UI の使い方
 
-Streamlit を起動:
+1. ブラウザで `http://localhost:8501` を開く
+2. `Instagram Reel全文` か `汎用OCR` を選ぶ
+3. 入力を貼る
+4. 実行する
 
-```bash
-streamlit run web_ui.py
+`Instagram Reel全文`
+
+- `https://www.instagram.com/reel/.../` の URL を入力します
+- 音声トラックを `faster-whisper` で文字起こしします
+- 出力は `JSON` / `TXT` / `SRT` です
+
+`汎用OCR`
+
+- URL またはローカル動画を入力します
+- 画面内テキストを OCR で抽出します
+- 出力は `JSON` / `TXT` / `SRT` です
+
+## CLI
+
+```powershell
+cd "D:\バイブコーディング\shorts-visual-transcriber"
+.\.venv311\Scripts\python.exe main.py "https://www.instagram.com/reel/XXXXXXXX/"
 ```
 
-表示されたURL（通常 `http://localhost:8501`）をブラウザで開き、次を実行します。
+## Google Sheets 連携
 
-- URL/ローカルパスを1行ずつ入力、または動画をアップロード
-- サイドバーで抽出・OCR設定を調整
-- `文字起こしを実行` を押す
-- 結果から `JSON/TXT/SRT` をダウンロード
+`投稿データ260301` のようなシートをキューとして使う場合は、ローカルの Python から Sheets API を叩く形が一番安定します。
 
-注: 初回起動時に Streamlit の `Email:` 入力が表示されることがあります。  
-空欄のまま Enter で問題ありません。
+前提:
 
-## CLI の使い方
+- Google Cloud で service account を作成する
+- 対象スプレッドシートをその service account に共有する
+- 動画URL列の列記号を把握する
 
-単体入力:
+実行例:
 
-```bash
-python main.py "https://www.tiktok.com/@example/video/1234567890"
+```powershell
+cd "D:\バイブコーディング\shorts-visual-transcriber"
+.\.venv311\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv311\Scripts\python.exe -m app.sheets_sync `
+  --service-account-file "C:\secure\service-account.json" `
+  --spreadsheet-id "1kFFRfOkcgtp0a4SZZ5q5hxMXLNAwlAGO6-bCEROAgCo" `
+  --sheet-name "投稿データ260301" `
+  --url-column "J"
 ```
 
-複数入力:
+このコマンドは次を行います。
 
-```bash
-python main.py "https://www.instagram.com/reel/XXXXXXXX/" "C:\\videos\\short.mp4"
-```
+- K列 `スタイル` が `音声リール` の行は ASR を実行する
+- K列 `スタイル` が `画像リール` の行は OCR を実行する
+- L列 `文字起こし` に全文を書き戻す
+- M列に状態、N列に処理日時、O列にエラーを記録する
 
-よく使うオプション例:
+自動運転する場合は、このコマンドを Windows Task Scheduler で数分おきに実行してください。
 
-```bash
-python main.py "https://www.youtube.com/shorts/XXXXXXXXXXX" ^
-  --output-dir output ^
-  --download-dir downloads ^
-  --sample-fps 2.5 ^
-  --scene-threshold 0.32 ^
-  --max-interval-sec 2.5 ^
-  --similarity-threshold 0.88 ^
-  --langs ja,en
-```
+## トラブルシュート
 
-ログインが必要な動画向け（cookies）:
-
-```bash
-python main.py "https://www.instagram.com/reel/XXXXXXXX/" --cookies-file "C:\\path\\cookies.txt"
-```
-
-## 出力ファイル
-
-- `<stem>.json`
-  - メタデータとセグメントの構造化データ
-- `<stem>.txt`
-  - 人が読みやすい時系列テキスト
-- `<stem>.srt`
-  - 字幕形式のタイムライン
-
-## パラメータ調整の目安
-
-- `--sample-fps` を上げる  
-  抽出点が増えて取りこぼし減、処理時間は増加
-- `--text-change-threshold` を下げる  
-  同一背景内のテキスト切替にも反応しやすくなる
-- `--scene-threshold` を下げる  
-  シーン変化に敏感になり抽出が増える
-- `--max-interval-sec` を下げる  
-  変化が少ない動画でも強制抽出が増える
-- `--similarity-threshold` を下げる  
-  近い文字列をより積極的に統合
-- `--min-ocr-confidence` を上げる  
-  ノイズは減るが薄い文字を落としやすい
-
-## 注意事項
-
-- プラットフォームの利用規約/APIポリシーにより、URL経由取得に制限がある場合があります。
-- 処理対象は権限のあるコンテンツのみ使用してください。
-- OCR精度は文字サイズ、コントラスト、動きの強さに影響されます。
-
-## 空出力になったとき
-
-このバージョンでは、セグメントが0件だった場合に自動で高密度再試行します。  
-それでも空の場合は、次を調整してください。
-
-- `サンプリングFPS` を上げる（例: `3.0 -> 5.0`）
-- `文字変化しきい値` を下げる（例: `0.055 -> 0.03`）
-- `OCR最小信頼度` を下げる（例: `0.15 -> 0.08`）
-- `OCR言語` を動画内文字に合わせる（例: `ja,en`）
-
-## 誤読補正辞書
-
-プロジェクト直下の `ocr_corrections.json` を自動で読み込みます。  
-よく出る誤読を `{"誤読": "正しい文字列"}` の形で追加すると、出力時に補正されます。
+- Web UI が起動しない場合は `C:\Users\Public\shorts_visual_transcriber_runtime\logs\web_ui_latest.log` を確認してください
+- 音声トラックのない Reel では ASR は失敗します
+- 一部の Instagram URL は未ログインだと `yt-dlp` が取得できません。その場合は cookies 指定が必要です
+- Windows では `paddle` を先に import してから `ctranslate2` / `faster-whisper` を import すると `WinError 127` になる環境があります
+- このリポジトリではその回避のため、ASR 側で `faster-whisper` を先に preload しています

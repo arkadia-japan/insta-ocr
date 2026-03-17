@@ -1,38 +1,76 @@
-from app.text_corrections import apply_text_corrections
+from app.text_corrections import apply_text_corrections, load_text_corrections
 
 
-def test_apply_text_corrections_replaces_known_ocr_errors():
-    corrections = {
-        "特微": "特徴",
-        "短文いNE": "短文LINE",
-    }
+def test_apply_text_corrections_normalizes_cta_line() -> None:
+    corrections = load_text_corrections()
 
-    text = "女に追われる男の特微\n短文いNEの男"
+    corrected = apply_text_corrections("メ気に入つたらフオロー", corrections)
 
-    assert apply_text_corrections(text, corrections) == "女に追われる男の特徴\n短文LINEの男"
+    assert corrected == "※気に入ったらフォロー"
 
 
-def test_apply_text_corrections_does_not_duplicate_existing_target_text():
-    corrections = {
-        "※気に入ったらフォローして": "※気に入ったらフォローしてね!",
-    }
+def test_apply_text_corrections_normalizes_cta_line_in_multiline_text() -> None:
+    corrections = load_text_corrections()
 
-    text = "※気に入ったらフォローしてね!"
+    corrected = apply_text_corrections("特徴\n気に入ったらフォ口ー", corrections)
 
-    assert apply_text_corrections(text, corrections) == "※気に入ったらフォローしてね!"
+    assert corrected == "特徴\n※気に入ったらフォロー"
 
 
-def test_apply_text_corrections_handles_recent_real_world_misreads():
-    corrections = {
-        "月然体": "自然体",
-        "自分の時間ある男": "自分の時間がある男",
-        "フォロ一": "フォロー",
-    }
+def test_apply_text_corrections_keeps_non_cta_line() -> None:
+    corrections = load_text_corrections()
 
-    text = "月然体でいれる男\n自分の時間ある男\n※気にスっナらフォロ一してね |"
+    corrected = apply_text_corrections("距離感がうまい男", corrections)
 
-    assert apply_text_corrections(text, corrections) == (
-        "自然体でいれる男\n"
-        "自分の時間がある男\n"
-        "※気にスっナらフォローしてね |"
+    assert corrected == "距離感がうまい男"
+
+
+def test_apply_text_corrections_normalizes_common_ocr_typo() -> None:
+    corrections = load_text_corrections()
+
+    corrected = apply_text_corrections("ど一も", corrections)
+
+    assert corrected == "どうも"
+
+
+def test_apply_text_corrections_normalizes_follow_benefit_line() -> None:
+    corrections = load_text_corrections()
+
+    corrected = apply_text_corrections("糸フォローで恋愛運上がります。", corrections)
+
+    assert corrected == "※フォローで恋愛運上がります。"
+
+
+def test_apply_text_corrections_formats_comparison_layout_and_footer() -> None:
+    corrections = load_text_corrections()
+
+    corrected = apply_text_corrections(
+        (
+            "沼る男の言い方\n"
+            "非モテ\n"
+            "トイレ行ってくる\n"
+            "悪くないね\n"
+            "モテ男\n"
+            "お手洗い行ってくるね\n"
+            "俺は00派かな\n"
+            "0日空いてる、会おう\n"
+            "いつでも見返せるようにいいねと保存\n"
+            "糸フォ口一で恋愛運上がります。\n"
+            "※フォローで恋愛運上がります。\n"
+            "糸フォローで恋愛運上がります"
+        ),
+        corrections,
+    )
+
+    assert corrected == (
+        "沼る男の言い方\n\n"
+        "非モテ\n"
+        "トイレ行ってくる\n"
+        "悪くないね\n\n"
+        "モテ男\n"
+        "お手洗い行ってくるね\n"
+        "俺は○○派かな\n"
+        "○日空いてる、会おう\n\n"
+        "いつでも見返せるようにいいねと保存\n"
+        "※フォローで恋愛運上がります。"
     )
