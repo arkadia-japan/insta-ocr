@@ -49,6 +49,18 @@ def get_runtime_output_dir() -> Path:
     return path
 
 
+def get_runtime_logs_dir() -> Path:
+    path = get_runtime_root() / "logs"
+    ensure_directory(path)
+    return path
+
+
+def get_runtime_config_dir() -> Path:
+    path = get_runtime_root() / "config"
+    ensure_directory(path)
+    return path
+
+
 def get_runtime_upload_dir() -> Path:
     path = get_runtime_root() / "uploads"
     ensure_directory(path)

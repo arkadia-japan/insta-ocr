@@ -2,8 +2,8 @@
 
 Instagram Reel / TikTok / YouTube Shorts のような縦動画から全文を作成するツールです。
 
-- `Instagram Reel全文` タブは音声認識 (`faster-whisper`) を使います
-- `汎用OCR` タブは画面内テキスト抽出 (`PaddleOCR`) を使います
+- `Whisperモード` タブは音声認識 (`faster-whisper`) を使います
+- `OCRモード` タブは画面内テキスト抽出 (`PaddleOCR`) を使います
 - Web UI は `Streamlit`、動画取得は `yt-dlp`、推奨 Python は `3.11` です
 
 ## 実行前提
@@ -51,17 +51,23 @@ py -3.11 -m venv .venv311
 ## Web UI の使い方
 
 1. ブラウザで `http://localhost:8501` を開く
-2. `Instagram Reel全文` か `汎用OCR` を選ぶ
-3. 入力を貼る
+2. `Sheetsモード` `Whisperモード` `OCRモード` のいずれかを選ぶ
+3. 入力または設定を確認する
 4. 実行する
 
-`Instagram Reel全文`
+`Sheetsモード`
+
+- Google Sheets 用の設定をプリセット保存できます
+- `未処理実行` `1件テスト` `エラー再実行` `画像リール再実行` `音声リール再実行` をボタンで実行できます
+- 実行ログを画面内で確認できます
+
+`Whisperモード`
 
 - `https://www.instagram.com/reel/.../` の URL を入力します
 - 音声トラックを `faster-whisper` で文字起こしします
 - 出力は `JSON` / `TXT` / `SRT` です
 
-`汎用OCR`
+`OCRモード`
 
 - URL またはローカル動画を入力します
 - 画面内テキストを OCR で抽出します

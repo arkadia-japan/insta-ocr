@@ -6,7 +6,14 @@
 2. `start_web_ui.bat` をダブルクリックする
 3. ブラウザで `http://localhost:8501` を開く
 
-`Instagram Reel全文` は音声認識、`汎用OCR` は画面テキスト抽出として使い分けます。
+`Sheetsモード` `Whisperモード` `OCRモード` を使い分けます。
+
+- `Sheetsモード`
+  Google Sheets の対象タブを選び、未処理実行や画像リール再実行をボタンで操作できます
+- `Whisperモード`
+  音声認識で Instagram Reel の全文を作成します
+- `OCRモード`
+  画面テキスト抽出を行います
 
 ## この起動スクリプトが行うこと
 
@@ -23,7 +30,7 @@
 - 古い Streamlit / Python プロセスが残っていないか確認する
 - `C:\Users\Public\shorts_visual_transcriber_runtime\logs\web_ui_latest.log` を確認する
 - すでに `8501` が使われている場合は既存 Web UI の再利用が優先される
-- `Instagram Reel全文` でエラーが出る場合は、URL が `https://www.instagram.com/reel/.../` 形式か確認する
+- `Whisperモード` でエラーが出る場合は、URL が `https://www.instagram.com/reel/.../` 形式か確認する
 - 音声トラックのない Reel は文字起こしできない
 
 ## 停止方法

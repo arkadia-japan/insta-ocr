@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from app.runtime_paths import configure_paddle_runtime_env, is_ascii_path, stage_video_for_runtime
+from app.runtime_paths import (
+    configure_paddle_runtime_env,
+    get_runtime_config_dir,
+    get_runtime_logs_dir,
+    is_ascii_path,
+    stage_video_for_runtime,
+)
 
 
 def test_is_ascii_path_detects_non_ascii() -> None:
@@ -20,7 +26,7 @@ def test_stage_video_for_runtime_copies_non_ascii_path(tmp_path: Path) -> None:
     assert staged != source.resolve()
     assert staged.parent == runtime_dir.resolve()
     assert staged.read_bytes() == b"video"
-    assert is_ascii_path(staged)
+    assert is_ascii_path(staged.name)
 
 
 def test_configure_paddle_runtime_env_uses_configured_root(monkeypatch, tmp_path: Path) -> None:
@@ -35,3 +41,11 @@ def test_configure_paddle_runtime_env_uses_configured_root(monkeypatch, tmp_path
     assert Path(values["PADDLE_PDX_CACHE_HOME"]).parent == root.resolve()
     assert Path(values["PADDLE_OCR_BASE_DIR"]).parent == root.resolve()
     assert values["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
+
+
+def test_runtime_helper_dirs_use_configured_root(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "runtime_ascii"
+    monkeypatch.setenv("SHORTS_VISUAL_TRANSCRIBER_RUNTIME", str(root))
+
+    assert get_runtime_logs_dir() == (root / "logs").resolve()
+    assert get_runtime_config_dir() == (root / "config").resolve()
