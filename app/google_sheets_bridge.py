@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,10 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Helper process for Google Sheets API access.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list-sheets")
+    list_parser.add_argument("--service-account-file", required=True)
+    list_parser.add_argument("--spreadsheet-id", required=True)
 
     fetch_parser = subparsers.add_parser("fetch-values")
     fetch_parser.add_argument("--service-account-file", required=True)
@@ -31,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
 
     service = build_sheets_service(Path(args.service_account_file).expanduser().resolve())
 
+    if args.command == "list-sheets":
+        payload = list_sheets(
+            service=service,
+            spreadsheet_id=args.spreadsheet_id,
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
     if args.command == "fetch-values":
         payload = fetch_values(
             service=service,
@@ -50,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_sheets_service(service_account_file: Path):
+    import google_auth_httplib2
+    import httplib2
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
@@ -57,7 +72,12 @@ def build_sheets_service(service_account_file: Path):
         str(service_account_file),
         scopes=[SHEETS_SCOPE],
     )
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    timeout_sec = float(os.environ.get("SHEETS_SYNC_GOOGLE_HTTP_TIMEOUT_SEC", "20"))
+    authorized_http = google_auth_httplib2.AuthorizedHttp(
+        credentials,
+        http=httplib2.Http(timeout=timeout_sec),
+    )
+    return build("sheets", "v4", http=authorized_http, cache_discovery=False)
 
 
 def fetch_values(service, spreadsheet_id: str, range_name: str) -> dict:
@@ -71,6 +91,30 @@ def fetch_values(service, spreadsheet_id: str, range_name: str) -> dict:
         )
         .execute()
     )
+
+
+def list_sheets(service, spreadsheet_id: str) -> dict:
+    payload = (
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="properties.title,sheets.properties(sheetId,title,index)",
+        )
+        .execute()
+    )
+    sheets = payload.get("sheets", []) if isinstance(payload, dict) else []
+    return {
+        "spreadsheet_title": payload.get("properties", {}).get("title", "") if isinstance(payload, dict) else "",
+        "sheets": [
+            {
+                "sheet_id": sheet.get("properties", {}).get("sheetId"),
+                "title": sheet.get("properties", {}).get("title", ""),
+                "index": sheet.get("properties", {}).get("index"),
+            }
+            for sheet in sheets
+            if isinstance(sheet, dict)
+        ],
+    }
 
 
 def batch_update_values(service, spreadsheet_id: str, request_body: dict) -> None:

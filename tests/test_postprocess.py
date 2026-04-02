@@ -205,6 +205,18 @@ def test_consolidate_ocr_candidates_prefers_cleaner_line_when_confidence_is_clos
     assert confidence == 0.845
 
 
+def test_consolidate_ocr_candidates_prefers_plausible_japanese_text_over_short_ascii_noise():
+    text, confidence = consolidate_ocr_candidates(
+        [
+            ("Trt", 0.86),
+            ("付き合いたてに確認したいこと", 0.8),
+        ]
+    )
+
+    assert text == "付き合いたてに確認したいこと"
+    assert confidence == 0.8
+
+
 def test_consolidate_ocr_candidates_dedupes_repeated_lines():
     text, confidence = consolidate_ocr_candidates(
         [

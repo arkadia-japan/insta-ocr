@@ -1,7 +1,15 @@
 import numpy as np
+import pytest
 
 from app.frame_sampler import VisualSegment
-from app.pipeline import _extract_results_for_frames, _extract_segments
+from app.models import TranscriptSegment
+from app.pipeline import (
+    _extract_results_for_frames,
+    _extract_segments,
+    _score_ocr_segments,
+    _should_retry_weak_output,
+    resolve_video_path,
+)
 
 
 class FakeOcrEngine:
@@ -56,3 +64,56 @@ def test_extract_results_for_frames_uses_full_batch_when_fast_batch_is_unavailab
 
     assert results == [("Supplemental text", 0.8)]
     assert engine.calls == [("full", [30])]
+
+
+def test_extract_results_for_frames_chunks_easyocr_batches():
+    engine = FakeOcrEngine(
+        {
+            1: ("one", 0.8),
+            2: ("two", 0.8),
+            3: ("three", 0.8),
+            4: ("four", 0.8),
+            5: ("five", 0.8),
+        }
+    )
+    engine._backend_name = "easyocr"
+
+    results = _extract_results_for_frames(
+        ocr_engine=engine,
+        frames=[_frame(1), _frame(2), _frame(3), _frame(4), _frame(5)],
+        memo={},
+    )
+
+    assert results == [
+        ("one", 0.8),
+        ("two", 0.8),
+        ("three", 0.8),
+        ("four", 0.8),
+        ("five", 0.8),
+    ]
+    assert engine.calls == [("full", [1, 2, 3, 4]), ("full", [5])]
+
+
+def test_should_retry_weak_output_flags_single_character_result():
+    segments = [TranscriptSegment(start_sec=0.0, end_sec=1.0, text="1", confidence=0.68)]
+
+    assert _should_retry_weak_output(segments) is True
+
+
+def test_score_ocr_segments_prefers_richer_higher_confidence_text():
+    weak_segments = [TranscriptSegment(start_sec=0.0, end_sec=1.0, text="1", confidence=0.68)]
+    better_segments = [
+        TranscriptSegment(start_sec=0.0, end_sec=1.0, text="付き合いたてに確認したいこと", confidence=0.91),
+        TranscriptSegment(start_sec=1.0, end_sec=2.0, text="連絡頻度を決める", confidence=0.88),
+    ]
+
+    assert _score_ocr_segments(better_segments) > _score_ocr_segments(weak_segments)
+
+
+def test_resolve_video_path_rejects_thumbnail_image_urls(tmp_path):
+    with pytest.raises(RuntimeError, match="image thumbnail"):
+        resolve_video_path(
+            "https://i.ytimg.com/vi/abc123/default.jpg",
+            download_dir=tmp_path,
+            cookies_file=None,
+        )

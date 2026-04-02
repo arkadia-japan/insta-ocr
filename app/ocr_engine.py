@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -9,6 +10,8 @@ import cv2
 
 from .runtime_paths import configure_paddle_runtime_env
 from .utils import normalize_text
+
+SUPPORTED_OCR_BACKENDS = ("auto", "paddle", "easyocr")
 
 
 @dataclass
@@ -54,28 +57,48 @@ class OcrEngine:
         languages: Iterable[str] = ("ja", "en"),
         gpu: bool = False,
         min_confidence: float = 0.15,
+        backend: str = "auto",
     ) -> None:
         self.languages = [token.strip().lower() for token in languages if token.strip()]
         self.min_confidence = min_confidence
         self.gpu = gpu
+        self.backend = self._normalize_backend(backend)
         self._backend_name = ""
 
-        paddle_error: Exception | None = None
-        try:
-            self._init_paddle_backend()
-            self._backend_name = "paddle"
-            return
-        except Exception as exc:  # pragma: no cover - fallback path is environment-specific
-            paddle_error = exc
+        if self.backend == "auto":
+            errors: list[tuple[str, Exception]] = []
+            for backend_name in ("paddle", "easyocr"):
+                try:
+                    self._initialize_backend(backend_name)
+                    return
+                except Exception as exc:  # pragma: no cover - fallback path is environment-specific
+                    errors.append((backend_name, exc))
+            details = " ".join(f"{name} error: {exc!s}" for name, exc in errors)
+            raise RuntimeError(f"OCR backend could not be initialized. {details}".strip()) from errors[-1][1]
 
         try:
+            self._initialize_backend(self.backend)
+        except Exception as exc:  # pragma: no cover - backend-specific path is environment-specific
+            raise RuntimeError(
+                f"Requested OCR backend '{self.backend}' could not be initialized: {exc!s}"
+            ) from exc
+
+    @staticmethod
+    def _normalize_backend(backend: str) -> str:
+        normalized = (backend or "auto").strip().lower()
+        if normalized not in SUPPORTED_OCR_BACKENDS:
+            supported = ", ".join(SUPPORTED_OCR_BACKENDS)
+            raise ValueError(f"Unsupported OCR backend '{backend}'. Supported values: {supported}")
+        return normalized
+
+    def _initialize_backend(self, backend_name: str) -> None:
+        if backend_name == "paddle":
+            self._init_paddle_backend()
+        elif backend_name == "easyocr":
             self._init_easyocr_backend()
-            self._backend_name = "easyocr"
-        except ImportError as exc:  # pragma: no cover - fallback path is environment-specific
-            message = "OCR backend could not be initialized."
-            if paddle_error is not None:
-                message += f" paddleocr error: {paddle_error!s}"
-            raise RuntimeError(message) from exc
+        else:  # pragma: no cover - validated by _normalize_backend
+            raise ValueError(f"Unsupported OCR backend '{backend_name}'")
+        self._backend_name = backend_name
 
     def _init_paddle_backend(self) -> None:
         configure_paddle_runtime_env()
@@ -97,6 +120,14 @@ class OcrEngine:
 
     def _init_easyocr_backend(self) -> None:
         import easyocr
+        import torch
+
+        # EasyOCR on Windows can overwhelm the machine when torch uses all CPU threads.
+        try:
+            torch.set_num_threads(max(1, min(2, os.cpu_count() or 1)))
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
 
         self.reader = easyocr.Reader(list(self.languages or ("ja", "en")), gpu=self.gpu, verbose=False)
 
@@ -140,21 +171,39 @@ class OcrEngine:
         return frame[y0:y1, x0:x1], left, top, right - left, bottom - top
 
     def _build_views(self, frame) -> list[OcrView]:
-        full_gray = self._grayscale(frame)
+        full_gray = self._grayscale(frame, scale=3.0)
         full_enhanced = self._enhance_gray(full_gray)
         full_binary = self._adaptive_binary(full_enhanced)
+        full_binary_inverted = cv2.bitwise_not(full_binary)
 
-        center_crop, cx, cy, cw, ch = self._crop(frame, 0.05, 0.06, 0.95, 0.94)
-        center_gray = self._grayscale(center_crop)
+        center_crop, cx, cy, cw, ch = self._crop(frame, 0.03, 0.04, 0.97, 0.96)
+        center_gray = self._grayscale(center_crop, scale=2.8)
         center_enhanced = self._enhance_gray(center_gray)
         center_binary = self._adaptive_binary(center_enhanced)
+        center_binary_inverted = cv2.bitwise_not(center_binary)
+
+        top_crop, tx, ty, tw, th = self._crop(frame, 0.02, 0.02, 0.98, 0.58)
+        top_gray = self._grayscale(top_crop, scale=2.6)
+        top_enhanced = self._enhance_gray(top_gray)
+        top_binary_inverted = cv2.bitwise_not(self._adaptive_binary(top_enhanced))
+
+        bottom_crop, bx, by, bw, bh = self._crop(frame, 0.02, 0.34, 0.98, 0.98)
+        bottom_gray = self._grayscale(bottom_crop, scale=2.6)
+        bottom_enhanced = self._enhance_gray(bottom_gray)
+        bottom_binary_inverted = cv2.bitwise_not(self._adaptive_binary(bottom_enhanced))
 
         return [
             OcrView(image=full_enhanced, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=0),
             OcrView(image=full_binary, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=1),
-            OcrView(image=frame, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=2),
-            OcrView(image=center_enhanced, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=3),
-            OcrView(image=center_binary, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=4),
+            OcrView(image=full_binary_inverted, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=2),
+            OcrView(image=frame, x_offset=0.0, y_offset=0.0, x_scale=1.0, y_scale=1.0, rank=3),
+            OcrView(image=center_enhanced, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=4),
+            OcrView(image=center_binary, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=5),
+            OcrView(image=center_binary_inverted, x_offset=cx, y_offset=cy, x_scale=cw, y_scale=ch, rank=6),
+            OcrView(image=top_enhanced, x_offset=tx, y_offset=ty, x_scale=tw, y_scale=th, rank=7),
+            OcrView(image=top_binary_inverted, x_offset=tx, y_offset=ty, x_scale=tw, y_scale=th, rank=8),
+            OcrView(image=bottom_enhanced, x_offset=bx, y_offset=by, x_scale=bw, y_scale=bh, rank=9),
+            OcrView(image=bottom_binary_inverted, x_offset=bx, y_offset=by, x_scale=bw, y_scale=bh, rank=10),
         ]
 
     def _build_primary_view(self, frame) -> OcrView:
@@ -181,14 +230,14 @@ class OcrEngine:
             detail=1,
             paragraph=False,
             decoder="beamsearch",
-            beamWidth=10,
-            contrast_ths=0.05,
-            adjust_contrast=0.7,
-            text_threshold=0.6,
-            low_text=0.3,
-            link_threshold=0.3,
-            canvas_size=2560,
-            mag_ratio=1.5,
+            beamWidth=12,
+            contrast_ths=0.03,
+            adjust_contrast=0.75,
+            text_threshold=0.55,
+            low_text=0.2,
+            link_threshold=0.25,
+            canvas_size=3200,
+            mag_ratio=1.8,
         )
 
     def _readtext_fast(self, image):
@@ -356,6 +405,37 @@ class OcrEngine:
 
         return primary_results
 
+    def _extract_text_primary_batch_easyocr(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        results: list[tuple[str, float | None]] = []
+        for frame in frames:
+            primary_view = self._build_primary_view(frame)
+            raw_results = self._readtext_fast(primary_view.image)
+            candidates = self._extract_candidates_from_results(raw_results=raw_results, view=primary_view)
+            results.append(self._finalize_candidates(candidates))
+        return results
+
+    def _extract_text_batch_easyocr(self, frames: list[object]) -> list[tuple[str, float | None]]:
+        results: list[tuple[str, float | None]] = []
+        for frame in frames:
+            primary_view = self._build_primary_view(frame)
+            raw_results = self._readtext_fast(primary_view.image)
+            candidates = self._extract_candidates_from_results(raw_results=raw_results, view=primary_view)
+            fast_result = self._finalize_candidates(candidates)
+
+            if self._needs_fast_rescue(fast_result):
+                secondary_view = self._build_secondary_fast_view(frame)
+                secondary_results = self._readtext_fast(secondary_view.image)
+                candidates.extend(
+                    self._extract_candidates_from_results(raw_results=secondary_results, view=secondary_view)
+                )
+                fast_result = self._finalize_candidates(candidates)
+
+            if self._needs_fallback(fast_result):
+                results.append(self.extract_text(frame))
+            else:
+                results.append(fast_result)
+        return results
+
     def extract_text(self, frame) -> tuple[str, float | None]:
         if getattr(self, "_backend_name", "") == "paddle":
             return self._extract_text_batch_paddle([frame])[0]
@@ -369,6 +449,8 @@ class OcrEngine:
     def extract_text_primary_batch(self, frames: list[object]) -> list[tuple[str, float | None]]:
         if getattr(self, "_backend_name", "") == "paddle":
             return self._extract_text_primary_batch_paddle(frames)
+        if getattr(self, "_backend_name", "") == "easyocr":
+            return self._extract_text_primary_batch_easyocr(frames)
 
         if not frames:
             return []
@@ -389,6 +471,8 @@ class OcrEngine:
     def extract_text_batch(self, frames: list[object]) -> list[tuple[str, float | None]]:
         if getattr(self, "_backend_name", "") == "paddle":
             return self._extract_text_batch_paddle(frames)
+        if getattr(self, "_backend_name", "") == "easyocr":
+            return self._extract_text_batch_easyocr(frames)
 
         if not frames:
             return []
@@ -554,7 +638,9 @@ class OcrEngine:
         for block in blocks:
             block_lines = [
                 cleaned
-                for cleaned in (cls._clean_output_line(candidate.text) for candidate in block)
+                for candidate in block
+                if cls._should_keep_output_candidate(candidate)
+                for cleaned in [cls._clean_output_line(candidate.text)]
                 if cleaned
             ]
             block_lines = cls._dedupe_output_lines(block_lines)
@@ -573,6 +659,33 @@ class OcrEngine:
         cleaned = re.sub(r"^[\"'`´‘’]+(?=\S)", "", cleaned)
         cleaned = re.sub(r"^\.\s*(?=[^0-9])", "", cleaned)
         return normalize_text(cleaned)
+
+    @staticmethod
+    def _should_keep_output_candidate(candidate: OcrCandidate) -> bool:
+        cleaned = OcrEngine._clean_output_line(candidate.text)
+        if not cleaned:
+            return False
+
+        compact = cleaned.replace(" ", "")
+        ascii_count = sum(char.isascii() for char in compact)
+        digit_count = sum(char.isdigit() for char in compact)
+        alpha_count = sum(char.isalpha() for char in compact)
+        noise_count = sum(char in "|[]{}<>~`-_/" for char in compact)
+        ascii_ratio = ascii_count / max(len(compact), 1)
+
+        if len(compact) == 1 and candidate.confidence < 0.9:
+            return False
+        if digit_count == len(compact) and len(compact) <= 2 and candidate.confidence < 0.98:
+            return False
+        if candidate.confidence < 0.45 and len(compact) < 5:
+            return False
+        if ascii_ratio >= 0.7 and len(compact) <= 6 and candidate.confidence < 0.9:
+            return False
+        if noise_count >= 2 and len(compact) <= 8:
+            return False
+        if alpha_count >= 2 and ascii_ratio >= 0.5 and len(compact) <= 4 and candidate.confidence < 0.92:
+            return False
+        return True
 
     @staticmethod
     def _dedupe_output_lines(lines: list[str]) -> list[str]:

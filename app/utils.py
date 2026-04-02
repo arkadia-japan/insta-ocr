@@ -5,6 +5,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+IMAGE_URL_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif")
+IMAGE_HOST_HINTS = ("i.ytimg.com", "yt3.ggpht.com")
+
+
 def ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -23,6 +27,26 @@ def detect_platform(value: str) -> str:
     if "youtube.com" in lowered or "youtu.be" in lowered:
         return "youtube"
     return "unknown"
+
+
+def looks_like_image_url(value: str) -> bool:
+    if not is_url(value):
+        return False
+
+    parsed = urlparse(value)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+
+    if any(hint in host for hint in IMAGE_HOST_HINTS):
+        return True
+    if any(path.endswith(extension) for extension in IMAGE_URL_EXTENSIONS):
+        return True
+    if any(
+        token in path
+        for token in ("/default.jpg", "/mqdefault.jpg", "/hqdefault.jpg", "/sddefault.jpg", "/maxresdefault.jpg")
+    ):
+        return True
+    return False
 
 
 def safe_stem_from_input(value: str) -> str:

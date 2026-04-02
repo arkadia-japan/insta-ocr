@@ -63,7 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--langs",
         default="ja,en",
-        help="OCR languages for easyocr (comma-separated). Default: ja,en",
+        help="OCR languages (comma-separated). Default: ja,en",
+    )
+    parser.add_argument(
+        "--ocr-backend",
+        default="auto",
+        choices=("auto", "paddle", "easyocr"),
+        help="OCR backend to use. Default: auto",
     )
     parser.add_argument("--gpu", action="store_true", help="Enable GPU for OCR if available.")
     parser.add_argument(
@@ -90,7 +96,12 @@ def main(argv: list[str] | None = None) -> int:
     if not langs:
         parser.error("At least one OCR language is required via --langs.")
 
-    ocr_engine = OcrEngine(languages=langs, gpu=args.gpu, min_confidence=args.min_ocr_confidence)
+    ocr_engine = OcrEngine(
+        languages=langs,
+        gpu=args.gpu,
+        min_confidence=args.min_ocr_confidence,
+        backend=args.ocr_backend,
+    )
     options = ProcessingOptions(
         sample_fps=args.sample_fps,
         scene_threshold=args.scene_threshold,
@@ -123,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             if not result.segments:
                 print(
                     "[WARN] No text detected. Try lowering --min-ocr-confidence, "
-                    "raising --sample-fps, or passing --langs that match the video text."
+                    "raising --sample-fps, switching --ocr-backend, or passing --langs that match the video text."
                 )
         except (FileNotFoundError, DownloadError, RuntimeError) as exc:
             failures += 1

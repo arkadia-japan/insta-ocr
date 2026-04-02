@@ -1,7 +1,14 @@
 import cv2
 import numpy as np
 
-from app.frame_sampler import VisualSegment, _frame_quality_score, _should_start_new_segment, merge_adjacent_visual_segments
+from app.frame_sampler import (
+    MAX_CANDIDATE_FRAMES,
+    VisualSegment,
+    _frame_quality_score,
+    _prepare_frame_for_storage,
+    _should_start_new_segment,
+    merge_adjacent_visual_segments,
+)
 
 
 def test_should_start_new_segment_when_visual_change_is_large():
@@ -54,3 +61,25 @@ def test_frame_quality_score_prefers_clear_text_frame():
     blurred_frame = cv2.GaussianBlur(clear_frame, (9, 9), 0)
 
     assert _frame_quality_score(clear_frame) > _frame_quality_score(blurred_frame)
+
+
+def test_prepare_frame_for_storage_downscales_large_frames():
+    frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+
+    prepared = _prepare_frame_for_storage(frame)
+
+    assert max(prepared.shape[:2]) == 1280
+
+
+def test_merge_adjacent_visual_segments_limits_candidate_count():
+    base_frame = np.full((80, 80, 3), 120, dtype=np.uint8)
+    other_frames = [np.full((80, 80, 3), value, dtype=np.uint8) for value in (121, 122, 123, 124)]
+    segments = [
+        VisualSegment(0.0, 1.0, 0.2, 0.1, 0.04, 10.0, base_frame, [base_frame, other_frames[0]]),
+        VisualSegment(1.0, 2.0, 1.2, 0.1, 0.04, 12.0, other_frames[1], [other_frames[1], other_frames[2]]),
+        VisualSegment(2.0, 3.0, 2.2, 0.4, 0.2, 8.0, other_frames[3], [other_frames[3]]),
+    ]
+
+    merged = merge_adjacent_visual_segments(segments, visual_threshold=0.1, pixel_threshold=0.02)
+
+    assert len(merged[0].candidate_frames) == MAX_CANDIDATE_FRAMES

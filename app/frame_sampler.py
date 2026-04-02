@@ -6,6 +6,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+MAX_STORED_FRAME_SIDE = 1280
+MAX_CANDIDATE_FRAMES = 2
+
 
 @dataclass
 class VisualSegment:
@@ -52,7 +55,85 @@ def _frame_quality_score(frame: np.ndarray) -> float:
     edge_density = float(np.mean(edges) / 255.0)
     mean_luma = float(np.mean(focus) / 255.0)
     exposure_balance = max(0.0, 1.0 - abs(mean_luma - 0.62))
-    return (laplacian_var * 0.75) + (contrast * 3.0) + (edge_density * 180.0) + (exposure_balance * 24.0)
+    text_overlay_score = _text_overlay_score(focus)
+    return (
+        (laplacian_var * 0.45)
+        + (contrast * 2.0)
+        + (edge_density * 90.0)
+        + (exposure_balance * 18.0)
+        + (text_overlay_score * 1.8)
+    )
+
+
+def _text_overlay_score(gray: np.ndarray) -> float:
+    if gray.size == 0:
+        return 0.0
+
+    enhanced = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+    focus_height, focus_width = enhanced.shape[:2]
+    kernel_width = max(9, int(round(focus_width * 0.1)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 3))
+
+    best_score = 0.0
+    for threshold_mode in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+        binary = cv2.adaptiveThreshold(
+            enhanced,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            threshold_mode,
+            31,
+            7,
+        )
+        connected = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        line_like_count = 0
+        line_like_area = 0.0
+        row_centers: list[float] = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if width < focus_width * 0.12 or width > focus_width * 0.96:
+                continue
+            if height < focus_height * 0.015 or height > focus_height * 0.18:
+                continue
+            aspect_ratio = width / max(height, 1)
+            if aspect_ratio < 2.1:
+                continue
+            area_ratio = (width * height) / max(focus_width * focus_height, 1)
+            if area_ratio > 0.25:
+                continue
+            line_like_count += 1
+            line_like_area += area_ratio
+            row_centers.append((y + (height / 2.0)) / max(focus_height, 1))
+
+        stroke_density = float(np.mean(connected == 0))
+        distinct_rows = 0
+        previous_center = None
+        for center in sorted(row_centers):
+            if previous_center is None or abs(center - previous_center) >= 0.08:
+                distinct_rows += 1
+                previous_center = center
+
+        score = (line_like_count * 14.0) + (line_like_area * 480.0) + (stroke_density * 28.0)
+        if distinct_rows >= 2:
+            score += distinct_rows * 18.0
+        else:
+            score *= 0.55
+        best_score = max(best_score, score)
+
+    return best_score
+
+
+def _prepare_frame_for_storage(frame: np.ndarray, max_side: int = MAX_STORED_FRAME_SIDE) -> np.ndarray:
+    height, width = frame.shape[:2]
+    longest_side = max(height, width)
+    if longest_side <= max_side:
+        return frame.copy()
+
+    scale = max_side / float(longest_side)
+    resized_width = max(1, int(round(width * scale)))
+    resized_height = max(1, int(round(height * scale)))
+    return cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
 
 
 def sample_video_segments(
@@ -139,7 +220,7 @@ def sample_video_segments(
             if quality_score > current_segment["quality_score"]:
                 current_segment["representative_time_sec"] = time_sec
                 current_segment["quality_score"] = quality_score
-                current_segment["frame"] = frame.copy()
+                current_segment["frame"] = _prepare_frame_for_storage(frame)
             _update_candidate_frames(
                 current_segment=current_segment,
                 frame=frame,
@@ -210,7 +291,7 @@ def _start_segment(
         "scene_delta": scene_delta,
         "visual_delta": visual_delta,
         "quality_score": quality_score,
-        "frame": frame.copy(),
+        "frame": _prepare_frame_for_storage(frame),
         "candidate_frames": [],
     }
     _update_candidate_frames(
@@ -227,7 +308,7 @@ def _update_candidate_frames(
     frame,
     time_sec: float,
     quality_score: float,
-    max_candidates: int = 3,
+    max_candidates: int = MAX_CANDIDATE_FRAMES,
     min_time_gap_sec: float = 0.45,
 ) -> None:
     for candidate in current_segment["candidate_frames"]:
@@ -235,14 +316,14 @@ def _update_candidate_frames(
             if quality_score > candidate["quality_score"]:
                 candidate["time_sec"] = time_sec
                 candidate["quality_score"] = quality_score
-                candidate["frame"] = frame.copy()
+                candidate["frame"] = _prepare_frame_for_storage(frame)
             return
 
     current_segment["candidate_frames"].append(
         {
             "time_sec": time_sec,
             "quality_score": quality_score,
-            "frame": frame.copy(),
+            "frame": _prepare_frame_for_storage(frame),
         }
     )
     current_segment["candidate_frames"].sort(key=lambda item: item["quality_score"], reverse=True)
@@ -292,10 +373,10 @@ def _should_start_new_segment(
 def _merge_candidate_frame_lists(
     left_frames: list[np.ndarray],
     right_frames: list[np.ndarray],
-    max_candidates: int = 3,
+    max_candidates: int = MAX_CANDIDATE_FRAMES,
 ) -> list[np.ndarray]:
-    merged = [frame.copy() for frame in left_frames]
-    merged.extend(frame.copy() for frame in right_frames)
+    merged = list(left_frames)
+    merged.extend(right_frames)
     if len(merged) <= max_candidates:
         return merged
 

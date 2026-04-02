@@ -15,7 +15,7 @@ from .ocr_engine import OcrEngine
 from .postprocess import consolidate_ocr_candidates, harmonize_segment_lines, merge_adjacent_similar_segments
 from .runtime_paths import stage_video_for_runtime
 from .text_corrections import apply_text_corrections, load_text_corrections
-from .utils import detect_platform, ensure_directory, is_url, normalize_text, safe_stem_from_input
+from .utils import detect_platform, ensure_directory, is_url, looks_like_image_url, normalize_text, safe_stem_from_input
 
 StatusCallback = Callable[[str], None]
 FrameSignature = tuple[int, int, bytes]
@@ -42,6 +42,11 @@ def resolve_video_path(
     cookies_file: Path | None,
 ) -> tuple[Path, bool]:
     if is_url(input_ref):
+        if looks_like_image_url(input_ref):
+            raise RuntimeError(
+                "Input URL looks like an image thumbnail, not a video URL. "
+                "Check the sheet URL column or source data."
+            )
         video_path = download_video(input_ref, download_dir=download_dir, cookies_file=cookies_file)
         return video_path, True
 
@@ -99,9 +104,15 @@ def run_single_input(
     fallback_used = False
     sampled_frames = len(visual_segments)
     ocr_hits = len(segments)
-    if not segments and options.retry_on_empty:
+    retry_reason = ""
+    if not segments:
+        retry_reason = "??????????????????????????"
+    elif _should_retry_weak_output(segments):
+        retry_reason = "OCR??????????????????????????????????"
+
+    if retry_reason and options.retry_on_empty:
         fallback_used = True
-        _report_status(status_callback, "??????????????????????????")
+        _report_status(status_callback, retry_reason)
         retry_visual_segments, _ = sample_video_segments(
             video_path=processing_video_path,
             sample_fps=max(options.sample_fps, 5.0),
@@ -115,7 +126,7 @@ def run_single_input(
             visual_segments=retry_visual_segments,
             status_callback=status_callback,
         )
-        if retry_segments:
+        if _score_ocr_segments(retry_segments) > _score_ocr_segments(segments):
             segments = retry_segments
             sampled_frames = len(retry_visual_segments)
             ocr_hits = len(retry_segments)
@@ -189,6 +200,8 @@ def _extract_segments(
         ocr_engine=ocr_engine,
         frames=representative_frames,
         memo=ocr_cache,
+        status_callback=status_callback,
+        progress_label="primary",
     )
 
     rescue_plan: list[tuple[int, list[object]]] = []
@@ -212,6 +225,8 @@ def _extract_segments(
             ocr_engine=ocr_engine,
             frames=rescue_frames,
             memo=ocr_cache,
+            status_callback=status_callback,
+            progress_label="rescue",
         )
 
     rescue_results_by_segment: dict[int, list[tuple[str, float | None]]] = {}
@@ -244,6 +259,8 @@ def _extract_results_for_frames(
     frames: list[object],
     memo: dict[FrameSignature, tuple[str, float | None]],
     fast_only: bool = False,
+    status_callback: StatusCallback | None = None,
+    progress_label: str = "",
 ) -> list[tuple[str, float | None]]:
     if not frames:
         return []
@@ -272,16 +289,35 @@ def _extract_results_for_frames(
         unique_slots.append([index])
 
     if unique_frames:
-        if fast_only and hasattr(ocr_engine, "extract_text_primary_batch"):
-            extracted = ocr_engine.extract_text_primary_batch(unique_frames)
-        else:
-            extracted = ocr_engine.extract_text_batch(unique_frames)
-        for key, slots, result in zip(unique_keys, unique_slots, extracted):
-            memo[key] = result
-            for index in slots:
-                results[index] = result
+        batch_size = _recommended_ocr_batch_size(ocr_engine=ocr_engine, total_frames=len(unique_frames))
+        for start in range(0, len(unique_frames), batch_size):
+            end = min(start + batch_size, len(unique_frames))
+            frame_chunk = unique_frames[start:end]
+            key_chunk = unique_keys[start:end]
+            slot_chunk = unique_slots[start:end]
+
+            if fast_only and hasattr(ocr_engine, "extract_text_primary_batch"):
+                extracted = ocr_engine.extract_text_primary_batch(frame_chunk)
+            else:
+                extracted = ocr_engine.extract_text_batch(frame_chunk)
+
+            for key, slots, result in zip(key_chunk, slot_chunk, extracted):
+                memo[key] = result
+                for index in slots:
+                    results[index] = result
+
+            if status_callback and len(unique_frames) > batch_size:
+                prefix = f"OCR {progress_label}".strip()
+                _report_status(status_callback, f"{prefix}: {end}/{len(unique_frames)} frames")
 
     return [result if result is not None else ("", None) for result in results]
+
+
+def _recommended_ocr_batch_size(ocr_engine: OcrEngine, total_frames: int) -> int:
+    backend_name = getattr(ocr_engine, "_backend_name", "")
+    if backend_name == "easyocr":
+        return 4
+    return max(total_frames, 1)
 
 
 def _should_rescue_segment(result: tuple[str, float | None]) -> bool:
@@ -340,6 +376,43 @@ def _text_noise_count(text: str) -> int:
         char.isascii() and not (char.isalnum() or char.isspace() or char in "!?.,:;/-_()#%&\'\"")
         for char in text
     )
+
+
+def _should_retry_weak_output(segments: list[TranscriptSegment]) -> bool:
+    non_empty_segments = [segment for segment in segments if normalize_text(segment.text)]
+    if not non_empty_segments:
+        return True
+
+    combined_text = "\n".join(segment.text for segment in non_empty_segments)
+    normalized = normalize_text(combined_text)
+    char_count = len(normalized.replace(" ", ""))
+    line_count = len(non_empty_segments)
+    confidences = [float(segment.confidence) for segment in non_empty_segments if segment.confidence is not None]
+    average_confidence = (sum(confidences) / len(confidences)) if confidences else None
+    noise_count = _text_noise_count(combined_text)
+
+    return (
+        char_count < 4
+        or (line_count == 1 and char_count < 10)
+        or (average_confidence is not None and average_confidence < 0.58)
+        or (average_confidence is not None and char_count < 12 and average_confidence < 0.74)
+        or noise_count >= 3
+    )
+
+
+def _score_ocr_segments(segments: list[TranscriptSegment]) -> float:
+    non_empty_segments = [segment for segment in segments if normalize_text(segment.text)]
+    if not non_empty_segments:
+        return 0.0
+
+    combined_text = "\n".join(segment.text for segment in non_empty_segments)
+    normalized = normalize_text(combined_text)
+    char_count = len(normalized.replace(" ", ""))
+    line_count = len(non_empty_segments)
+    confidences = [float(segment.confidence) for segment in non_empty_segments if segment.confidence is not None]
+    average_confidence = (sum(confidences) / len(confidences)) if confidences else 0.55
+    noise_penalty = _text_noise_count(combined_text) * 12
+    return average_confidence * 100.0 + min(char_count, 140) + line_count * 8 - noise_penalty
 
 
 def _report_status(callback: StatusCallback | None, message: str) -> None:

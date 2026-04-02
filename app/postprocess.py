@@ -109,8 +109,8 @@ def harmonize_segment_lines(segments: list[TranscriptSegment]) -> list[Transcrip
         best = max(
             group,
             key=lambda item: (
+                _line_quality_score(item["text"]) + item["confidence"] * 12.0,
                 item["confidence"],
-                -_line_noise_count(item["text"]),
                 len(item["text"]),
             ),
         )
@@ -172,9 +172,9 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
         groups,
         key=lambda group: (
             len(group),
-            -min(_text_noise_count(item.text) for item in group),
+            max(_text_quality_score(item.text, item.confidence or 0.0) for item in group),
+            sum(_text_quality_score(item.text, item.confidence or 0.0) for item in group),
             sum(item.confidence or 0.0 for item in group),
-            max(len(normalize_text(item.text)) for item in group),
         ),
     )
     consensus_text = _build_consensus_text(best_group)
@@ -182,7 +182,7 @@ def consolidate_ocr_candidates(candidates: list[tuple[str, float | None]]) -> tu
         chosen = max(
             best_group,
             key=lambda item: (
-                -_text_noise_count(item.text),
+                _text_quality_score(item.text, item.confidence or 0.0),
                 item.confidence or 0.0,
                 len(normalize_text(item.text)),
             ),
@@ -269,13 +269,16 @@ def _choose_consensus_line(candidates: list[tuple[str, float]]) -> str:
     def group_score(group: list[tuple[str, float]]) -> tuple[int, int, float, int]:
         return (
             len(group),
-            -min(_line_noise_count(text) for text, _ in group),
+            max(int(round(_line_quality_score(text))) for text, _ in group),
             sum(conf for _, conf in group),
             max(len(text) for text, _ in group),
         )
 
     best_group = max(groups, key=group_score)
-    return max(best_group, key=lambda item: (-_line_noise_count(item[0]), item[1], len(item[0])))[0]
+    return max(
+        best_group,
+        key=lambda item: (_line_quality_score(item[0]) + item[1] * 15.0, item[1], len(item[0])),
+    )[0]
 
 
 def _line_similarity(left: str, right: str) -> float:
@@ -374,11 +377,64 @@ def _text_noise_count(text: str) -> int:
     return sum(_line_noise_count(line) for line in text.splitlines())
 
 
+def _text_quality_score(text: str, confidence: float) -> float:
+    lines = [normalize_text(line) for line in text.splitlines() if normalize_text(line)]
+    if not lines:
+        return -999.0
+
+    single_char_lines = sum(1 for line in lines if len(line.replace(" ", "")) <= 1)
+    return (
+        confidence * 100.0
+        + sum(_line_quality_score(line) for line in lines)
+        + len(lines) * 4.0
+        - single_char_lines * 12.0
+        - _text_noise_count(text) * 8.0
+    )
+
+
 def _line_noise_count(text: str) -> int:
     return sum(char in "|[]{}<>~`" for char in text) + sum(
         char.isascii() and not (char.isalnum() or char.isspace() or char in "!?.,:;/-_()#%&'\"")
         for char in text
     )
+
+
+def _line_quality_score(text: str) -> float:
+    normalized = normalize_text(text)
+    compact = normalized.replace(" ", "")
+    if not compact:
+        return -999.0
+
+    japanese_chars = _count_japanese_chars(compact)
+    ascii_chars = sum(char.isascii() for char in compact)
+    digit_chars = sum(char.isdigit() for char in compact)
+    noise_count = _line_noise_count(normalized)
+    ascii_ratio = ascii_chars / max(len(compact), 1)
+
+    score = min(len(compact), 42) * 1.3 + japanese_chars * 3.4 - noise_count * 14.0
+    if len(compact) <= 1:
+        score -= 20.0
+    if digit_chars == len(compact) and len(compact) <= 4:
+        score -= 24.0
+    if ascii_chars == len(compact) and len(compact) <= 4:
+        score -= 12.0
+    if ascii_ratio >= 0.7 and japanese_chars == 0 and len(compact) <= 8:
+        score -= 10.0
+    return score
+
+
+def _count_japanese_chars(text: str) -> int:
+    count = 0
+    for char in text:
+        codepoint = ord(char)
+        if (
+            0x3040 <= codepoint <= 0x30FF
+            or 0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xFF66 <= codepoint <= 0xFF9F
+        ):
+            count += 1
+    return count
 
 
 def _should_group_lines(left: str, right: str) -> bool:

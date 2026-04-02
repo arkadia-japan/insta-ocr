@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OCR-based text transcription for short-form videos."
 requires-python = ">=3.11"
 dependencies = [
+  "easyocr>=1.7.1",
   "faster-whisper>=1.1.0",
   "google-api-python-client>=2.170.0",
   "google-auth>=2.40.0",
